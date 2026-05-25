@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>织梦纪 DreamWeave</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">DW</div>
+          <div>
+            <h1>织梦纪</h1>
+            <p id="connectionStatus">连接中</p>
+          </div>
+        </div>
+        <button class="icon-button" id="settingsToggle" type="button" title="设定">
+          <span aria-hidden="true">⚙</span>
+        </button>
+      </header>
+
+      <section class="settings-panel" id="settingsPanel" hidden>
+        <label>
+          <span>模型</span>
+          <select id="modelSelect">
+            <option value="qwen3:14b">qwen3:14b</option>
+          </select>
+        </label>
+        <label>
+          <span>标题</span>
+          <input id="storyTitle" value="黑夜古堡" />
+        </label>
+        <label>
+          <span>世界观</span>
+          <textarea id="worldSetting" rows="3">中世纪奇幻世界</textarea>
+        </label>
+        <label>
+          <span>角色</span>
+          <textarea id="characterSetting" rows="3">用户是失忆的贵族继承人</textarea>
+        </label>
+      </section>
+
+      <section class="story-stage" aria-live="polite">
+        <div class="story-meta">
+          <span id="storyTitleDisplay">黑夜古堡</span>
+          <span id="workerStatus">Worker 未连接</span>
+        </div>
+        <div class="message-list" id="messageList"></div>
+      </section>
+
+      <form class="composer" id="composer">
+        <textarea
+          id="messageInput"
+          rows="2"
+          placeholder="写下你的下一步行动"
+          autocomplete="off"
+        ></textarea>
+        <button class="send-button" id="sendButton" type="submit">
+          <span aria-hidden="true">↗</span>
+          <span>发送</span>
+        </button>
+      </form>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

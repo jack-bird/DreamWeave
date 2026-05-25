@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from .schemas import StoryContext
+
+
+DEFAULT_TEMPLATE = """你是织梦纪的互动小说续写引擎。
+
+你的任务是根据用户输入、小说设定、角色设定和最近剧情，续写下一段沉浸式小说正文。
+
+严格输出规则：
+1. 只输出小说正文，不要输出解释、标题、角色名、时间戳、系统提示或 Markdown。
+2. 不要输出“我该怎么办”“请选择”“请直接输入”等界面提示。
+3. 不要输出选项列表，不要使用项目符号或编号。
+4. 不要替用户做重大决定，不要代替用户说出台词。
+5. 用户输入是主角最后一个已经完成的动作；续写中不要让主角再主动执行新的身体动作或选择。
+6. 禁止描写主角继续前进、后退、逃跑、攻击、开门、选择道路、说话、拿取物品或做决定。
+7. 允许推动外部事件，例如环境变化、声音、气味、危险逼近、NPC 出现、记忆闪回和角色感受。
+8. 承认用户输入的动作已经发生，重点描写该动作造成的后果。
+9. 保持角色、世界观和氛围一致。
+10. 输出 2 到 3 个自然段，总长度控制在 180 到 360 个中文字符。
+11. 结尾必须是完整句子，可以留下悬念或可回应空间，但仍然必须是小说正文。
+
+小说标题：
+{{story_title}}
+
+世界观设定：
+{{world_setting}}
+
+角色设定：
+{{character_setting}}
+
+最近剧情：
+{{recent_messages}}
+
+用户输入：
+{{user_input}}
+
+现在开始续写，只输出小说正文："""
+
+
+def load_story_template() -> str:
+    current = Path(__file__).resolve()
+    project_root = current.parents[4]
+    prompt_path = project_root / "packages" / "prompts" / "story_continue.txt"
+
+    if prompt_path.exists():
+        return prompt_path.read_text(encoding="utf-8")
+
+    return DEFAULT_TEMPLATE
+
+
+def render_story_prompt(context: StoryContext, user_input: str) -> str:
+    recent_messages = "\n".join(context.recent_messages) if context.recent_messages else "暂无"
+    template = load_story_template()
+
+    values = {
+        "story_title": context.story_title,
+        "world_setting": context.world_setting,
+        "character_setting": context.character_setting,
+        "recent_messages": recent_messages,
+        "user_input": user_input,
+    }
+
+    for key, value in values.items():
+        template = template.replace("{{" + key + "}}", value)
+
+    return template
