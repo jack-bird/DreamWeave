@@ -2,6 +2,9 @@
 
 const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:3000" : "";
 const STORAGE_KEY = "dreamweave.mobile.v1";
+const DEFAULT_USER_ID = "local_user";
+const DEFAULT_STORY_ID = "local_story";
+const DEFAULT_SESSION_ID = "local_session";
 
 const state = {
   messages: [],
@@ -41,6 +44,36 @@ function loadState() {
     state.model = saved.model || state.model;
   } catch {
     localStorage.removeItem(STORAGE_KEY);
+  }
+}
+
+async function loadSessionMessages() {
+  try {
+    const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(DEFAULT_SESSION_ID)}/messages`, {
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      return;
+    }
+
+    const result = await response.json();
+    if (!result.persistence_enabled || !Array.isArray(result.messages) || !result.messages.length) {
+      return;
+    }
+
+    state.messages = result.messages
+      .filter((item) => item.role === "user" || item.role === "assistant")
+      .map((item) => ({
+        role: item.role,
+        content: item.content,
+        model: item.model,
+        taskId: item.task_id,
+        createdAt: item.created_at,
+      }));
+    saveState();
+    renderMessages();
+  } catch {
+    // Local storage remains the fallback when database history is unavailable.
   }
 }
 
@@ -177,9 +210,9 @@ async function submitMessage(message) {
       },
       signal: controller.signal,
       body: JSON.stringify({
-        user_id: "local_user",
-        session_id: "local_session",
-        story_id: "local_story",
+        user_id: DEFAULT_USER_ID,
+        session_id: DEFAULT_SESSION_ID,
+        story_id: DEFAULT_STORY_ID,
         model: state.model,
         message,
         timeout_ms: 180000,
@@ -275,6 +308,7 @@ function init() {
   renderMessages();
   updateSendState();
   refreshHealth();
+  loadSessionMessages();
   window.setInterval(refreshHealth, 10000);
 }
 

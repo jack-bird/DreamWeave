@@ -1,17 +1,35 @@
 # DreamWeave Server
 
-这是第一版最小服务器，用于本地跑通：
+这是第一版最小服务器，用于跑通：
 
 ```text
 HTTP 请求 → Server → Worker WebSocket → Ollama → Worker → Server → HTTP 返回
 ```
 
-当前实现不依赖外部 npm 包，使用 Node.js 内置 `http`、`net`、`crypto` 实现最小 HTTP 和 WebSocket 能力。后续功能稳定后，可以迁移到 NestJS、Redis、PostgreSQL。
+当前使用 Node.js 内置 `http`、`net`、`crypto` 实现最小 HTTP 和 WebSocket 能力，并通过 `pg` 接入 PostgreSQL 做第一版消息持久化。后续功能稳定后，可以迁移到 NestJS、Redis/BullMQ。
+
+## 配置
+
+server 会自动读取以下 `.env` 位置：
+
+- 当前启动目录下的 `.env`
+- 项目根目录 `.env`
+- `/opt/dreamweave/.env`
+
+关键配置：
+
+```text
+DREAMWEAVE_SERVER_HOST=127.0.0.1
+DREAMWEAVE_SERVER_PORT=3000
+DREAMWEAVE_WORKER_PATH=/ws/worker
+DATABASE_URL=postgres://dreamweave_app:change_me@127.0.0.1:5432/dreamweave
+```
 
 ## 启动
 
 ```powershell
 cd E:\ai_home\AI_Projects\DreamWeave\apps\server
+npm install
 npm run start
 ```
 
@@ -54,7 +72,7 @@ Invoke-RestMethod `
 
 ### `GET /health`
 
-查看服务器和 Worker 状态。
+查看服务器、数据库和 Worker 状态。
 
 ### `GET /`
 
@@ -64,9 +82,17 @@ Invoke-RestMethod `
 
 查看已连接 Worker。
 
+### `GET /api/sessions/:session_id/messages`
+
+读取某个会话的历史消息。当前 H5 默认读取：
+
+```text
+/api/sessions/local_session/messages
+```
+
 ### `POST /api/story/continue`
 
-创建小说续写任务。
+创建小说续写任务。配置 `DATABASE_URL` 后，server 会保存用户输入、AI 回复和 AI 任务状态。
 
 请求体示例：
 

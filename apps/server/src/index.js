@@ -6,6 +6,8 @@ const http = require("node:http");
 const path = require("node:path");
 const { URL } = require("node:url");
 
+loadEnvFiles();
+
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const HOST = process.env.DREAMWEAVE_SERVER_HOST || "127.0.0.1";
 const PORT = Number(process.env.DREAMWEAVE_SERVER_PORT || 3000);
@@ -13,6 +15,7 @@ const WORKER_PATH = process.env.DREAMWEAVE_WORKER_PATH || "/ws/worker";
 const SERVER_TASK_TIMEOUT = Number(process.env.DREAMWEAVE_SERVER_TASK_TIMEOUT || 200000);
 const HEARTBEAT_INTERVAL = Number(process.env.DREAMWEAVE_HEARTBEAT_INTERVAL || 15000);
 const WORKER_OFFLINE_TIMEOUT = Number(process.env.DREAMWEAVE_WORKER_OFFLINE_TIMEOUT || 45000);
+const DATABASE_URL = process.env.DATABASE_URL || "";
 
 const workers = new Map();
 const pendingTasks = new Map();
@@ -30,6 +33,81 @@ const CONTENT_TYPES = {
   ".ico": "image/x-icon",
 };
 
+const database = createDatabase();
+
+function loadEnvFiles() {
+  const candidates = [
+    process.env.DREAMWEAVE_ENV_FILE,
+    path.resolve(process.cwd(), ".env"),
+    path.resolve(__dirname, "..", "..", "..", ".env"),
+    path.resolve(__dirname, "..", "..", "..", "..", ".env"),
+    "/opt/dreamweave/.env",
+  ].filter(Boolean);
+
+  const loaded = new Set();
+  for (const filePath of candidates) {
+    if (loaded.has(filePath) || !fs.existsSync(filePath)) {
+      continue;
+    }
+
+    loaded.add(filePath);
+    const content = fs.readFileSync(filePath, "utf8");
+    for (const rawLine of content.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) {
+        continue;
+      }
+
+      const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+      if (!match || process.env[match[1]] !== undefined) {
+        continue;
+      }
+
+      process.env[match[1]] = unquoteEnvValue(match[2].trim());
+    }
+  }
+}
+
+function unquoteEnvValue(value) {
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function createDatabase() {
+  if (!DATABASE_URL) {
+    return {
+      pool: null,
+      configured: false,
+      error: null,
+    };
+  }
+
+  try {
+    const { Pool } = require("pg");
+    return {
+      pool: new Pool({
+        connectionString: DATABASE_URL,
+        max: Number(process.env.DREAMWEAVE_DB_POOL_SIZE || 5),
+        idleTimeoutMillis: 30000,
+      }),
+      configured: true,
+      error: null,
+    };
+  } catch (error) {
+    console.warn(`[server] PostgreSQL disabled: ${error.message}`);
+    return {
+      pool: null,
+      configured: true,
+      error: error.message,
+    };
+  }
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -45,6 +123,345 @@ function makeMessage(type, payload, requestId = makeId("req")) {
     timestamp: nowIso(),
     payload,
   };
+}
+
+async function databaseStatus() {
+  const status = {
+    configured: database.configured,
+    connected: Boolean(database.pool),
+    error: database.error || undefined,
+  };
+
+  if (!database.pool) {
+    return status;
+  }
+
+  try {
+    await database.pool.query("SELECT 1");
+    return {
+      configured: true,
+      connected: true,
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      connected: false,
+      error: error.message,
+    };
+  }
+}
+
+async function handleHealth(req, res) {
+  sendJson(res, 200, {
+    status: "ok",
+    server_time: nowIso(),
+    database: await databaseStatus(),
+    worker_count: getConnectedWorkers().length,
+    pending_task_count: pendingTasks.size,
+    workers: getConnectedWorkers().map(publicWorker),
+  });
+}
+
+async function withDbTransaction(callback) {
+  if (!database.pool) {
+    return null;
+  }
+
+  const client = await database.pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await callback(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      console.warn(`[server] Database rollback failed: ${rollbackError.message}`);
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function jsonParam(value) {
+  return JSON.stringify(value || {});
+}
+
+function cleanText(value, fallback = "") {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function userNickname(userId) {
+  if (userId === "local_user" || userId === "user_local") {
+    return "本地用户";
+  }
+  return userId || "用户";
+}
+
+async function persistTaskDispatch(task, worker, requestId, timeoutMs) {
+  if (!database.pool) {
+    if (database.configured) {
+      throw new Error(database.error || "PostgreSQL is configured but unavailable");
+    }
+    return;
+  }
+
+  const context = task.context || {};
+  const storyTitle = cleanText(context.story_title, "黑夜古堡");
+  const worldSetting = cleanText(context.world_setting, "中世纪奇幻世界");
+  const characterSetting = cleanText(context.character_setting, "用户是失忆的贵族继承人");
+  const sessionTitle = storyTitle ? `${storyTitle}：当前会话` : "新的会话";
+  const now = new Date();
+
+  await withDbTransaction(async (client) => {
+    await client.query(
+      `
+      INSERT INTO users (id, nickname)
+      VALUES ($1, $2)
+      ON CONFLICT (id) DO UPDATE
+      SET nickname = EXCLUDED.nickname
+      `,
+      [task.user_id, userNickname(task.user_id)],
+    );
+
+    await client.query(
+      `
+      INSERT INTO stories (
+        id,
+        user_id,
+        title,
+        world_setting,
+        character_setting,
+        default_model,
+        generation_options
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+      ON CONFLICT (id) DO UPDATE
+      SET
+        title = EXCLUDED.title,
+        world_setting = EXCLUDED.world_setting,
+        character_setting = EXCLUDED.character_setting,
+        default_model = EXCLUDED.default_model,
+        generation_options = EXCLUDED.generation_options
+      `,
+      [
+        task.story_id,
+        task.user_id,
+        storyTitle,
+        worldSetting,
+        characterSetting,
+        task.model || null,
+        jsonParam(task.generation_options),
+      ],
+    );
+
+    await client.query(
+      `
+      INSERT INTO sessions (id, user_id, story_id, title, status)
+      VALUES ($1, $2, $3, $4, 'active')
+      ON CONFLICT (id) DO UPDATE
+      SET
+        story_id = EXCLUDED.story_id,
+        title = EXCLUDED.title,
+        status = 'active'
+      `,
+      [task.session_id, task.user_id, task.story_id, sessionTitle],
+    );
+
+    await client.query(
+      `
+      INSERT INTO ai_tasks (
+        id,
+        task_type,
+        status,
+        user_id,
+        story_id,
+        session_id,
+        worker_id,
+        request_id,
+        model,
+        input,
+        context,
+        generation_options,
+        timeout_ms,
+        started_at
+      )
+      VALUES ($1, $2, 'sent_to_worker', $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12, $13)
+      ON CONFLICT (id) DO UPDATE
+      SET
+        status = EXCLUDED.status,
+        worker_id = EXCLUDED.worker_id,
+        request_id = EXCLUDED.request_id,
+        model = EXCLUDED.model,
+        input = EXCLUDED.input,
+        context = EXCLUDED.context,
+        generation_options = EXCLUDED.generation_options,
+        timeout_ms = EXCLUDED.timeout_ms,
+        started_at = EXCLUDED.started_at
+      `,
+      [
+        task.task_id,
+        task.task_type,
+        task.user_id,
+        task.story_id,
+        task.session_id,
+        worker.workerId,
+        requestId,
+        task.model || null,
+        task.input,
+        jsonParam(task.context),
+        jsonParam(task.generation_options),
+        timeoutMs,
+        now,
+      ],
+    );
+
+    await client.query(
+      `
+      INSERT INTO messages (id, session_id, role, content, task_id, metadata)
+      VALUES ($1, $2, 'user', $3, $4, $5::jsonb)
+      `,
+      [
+        makeId("msg"),
+        task.session_id,
+        task.input,
+        task.task_id,
+        jsonParam({
+          request_id: requestId,
+          story_id: task.story_id,
+        }),
+      ],
+    );
+  });
+}
+
+async function persistTaskSuccess(pending, message, responsePayload) {
+  if (!database.pool) {
+    return;
+  }
+
+  const task = pending.task;
+  const payload = message.payload || {};
+  const content = cleanText(payload.content, "");
+  const model = payload.model || task.model || null;
+  const durationMs = Number(payload.duration_ms || Date.now() - pending.startedAt);
+
+  await withDbTransaction(async (client) => {
+    await client.query(
+      `
+      UPDATE ai_tasks
+      SET
+        status = 'success',
+        output = $2,
+        model = COALESCE($3, model),
+        worker_id = $4,
+        duration_ms = $5,
+        completed_at = now()
+      WHERE id = $1
+      `,
+      [task.task_id, content, model, payload.worker_id || pending.workerId, durationMs],
+    );
+
+    await client.query(
+      `
+      INSERT INTO messages (id, session_id, role, content, model, task_id, metadata)
+      VALUES ($1, $2, 'assistant', $3, $4, $5, $6::jsonb)
+      `,
+      [
+        makeId("msg"),
+        task.session_id,
+        content,
+        model,
+        task.task_id,
+        jsonParam({
+          request_id: responsePayload.request_id,
+          worker_id: payload.worker_id || pending.workerId,
+          usage: payload.usage || null,
+        }),
+      ],
+    );
+
+    await client.query("UPDATE sessions SET updated_at = now() WHERE id = $1", [task.session_id]);
+  });
+}
+
+async function persistTaskError(pending, payload, status = "error") {
+  if (!database.pool || !pending?.task) {
+    return;
+  }
+
+  const durationMs = Math.max(Date.now() - pending.startedAt, 0);
+  await withDbTransaction(async (client) => {
+    await client.query(
+      `
+      UPDATE ai_tasks
+      SET
+        status = $2,
+        error_code = $3,
+        error_message = $4,
+        retryable = $5,
+        duration_ms = $6,
+        completed_at = now()
+      WHERE id = $1
+      `,
+      [
+        pending.task.task_id,
+        status,
+        payload.error_code || "UNKNOWN_ERROR",
+        payload.message || null,
+        payload.retryable ?? null,
+        durationMs,
+      ],
+    );
+
+    await client.query("UPDATE sessions SET updated_at = now() WHERE id = $1", [pending.task.session_id]);
+  });
+}
+
+async function handleSessionMessages(req, res, sessionId) {
+  if (!database.pool) {
+    sendJson(res, 200, {
+      session_id: sessionId,
+      persistence_enabled: false,
+      messages: [],
+    });
+    return;
+  }
+
+  try {
+    const result = await database.pool.query(
+      `
+      SELECT id, role, content, model, task_id, metadata, created_at
+      FROM messages
+      WHERE session_id = $1
+      ORDER BY created_at ASC, id ASC
+      LIMIT 200
+      `,
+      [sessionId],
+    );
+
+    sendJson(res, 200, {
+      session_id: sessionId,
+      persistence_enabled: true,
+      messages: result.rows.map((row) => ({
+        id: row.id,
+        role: row.role,
+        content: row.content,
+        model: row.model,
+        task_id: row.task_id,
+        metadata: row.metadata,
+        created_at: row.created_at,
+      })),
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_READ_FAILED",
+      message: error.message,
+    });
+  }
 }
 
 function sendJson(res, statusCode, payload) {
@@ -250,30 +667,50 @@ async function handleStoryContinue(req, res) {
   const timeoutMs = Number(body.server_timeout_ms || SERVER_TASK_TIMEOUT);
   console.log(`[server] Dispatch task ${task.task_id} to worker ${worker.workerId}, timeout=${timeoutMs}ms`);
 
+  try {
+    await persistTaskDispatch(task, worker, requestId, timeoutMs);
+  } catch (error) {
+    console.error(`[server] Failed to persist task dispatch ${task.task_id}:`, error);
+    sendJson(res, 500, {
+      task_id: task.task_id,
+      status: "error",
+      error_code: "DB_PERSIST_FAILED",
+      message: error.message,
+    });
+    return;
+  }
+
   const resultPromise = new Promise((resolve) => {
     const timeout = setTimeout(() => {
       console.warn(`[server] Task timeout: ${task.task_id}`);
+      const pending = pendingTasks.get(task.task_id);
       pendingTasks.delete(task.task_id);
+      worker.runningTasks = Math.max(worker.runningTasks - 1, 0);
       worker.send("ai.task_cancel", {
         task_id: task.task_id,
         reason: "server_timeout",
       }, requestId);
+      const timeoutPayload = {
+        task_id: task.task_id,
+        status: "error",
+        model: task.model,
+        worker_id: worker.workerId,
+        error_code: "TASK_TIMEOUT",
+        message: `Server 等待 Worker 结果超时：${timeoutMs} ms`,
+        retryable: true,
+      };
+      void persistTaskError(pending, timeoutPayload, "timeout").catch((error) => {
+        console.error(`[server] Failed to persist task timeout ${task.task_id}:`, error);
+      });
       resolve({
         httpStatus: 504,
-        payload: {
-          task_id: task.task_id,
-          status: "error",
-          model: task.model,
-          worker_id: worker.workerId,
-          error_code: "TASK_TIMEOUT",
-          message: `Server 等待 Worker 结果超时：${timeoutMs} ms`,
-          retryable: true,
-        },
+        payload: timeoutPayload,
       });
     }, timeoutMs);
 
     pendingTasks.set(task.task_id, {
       taskId: task.task_id,
+      task,
       requestId,
       workerId: worker.workerId,
       startedAt: Date.now(),
@@ -290,7 +727,7 @@ async function handleStoryContinue(req, res) {
   sendJson(res, result.httpStatus, result.payload);
 }
 
-function completePendingTask(message) {
+async function completePendingTask(message) {
   const payload = message.payload || {};
   const taskId = payload.task_id;
   if (!taskId) {
@@ -313,12 +750,25 @@ function completePendingTask(message) {
   }
 
   const statusCode = message.type === "ai.result" ? 200 : errorCodeToHttpStatus(payload.error_code);
+  const responsePayload = {
+    ...payload,
+    request_id: message.request_id,
+  };
+
+  try {
+    if (message.type === "ai.result") {
+      await persistTaskSuccess(pending, message, responsePayload);
+    } else {
+      await persistTaskError(pending, responsePayload, "error");
+    }
+  } catch (error) {
+    console.error(`[server] Failed to persist task result ${taskId}:`, error);
+    responsePayload.persistence_error = error.message;
+  }
+
   pending.resolve({
     httpStatus: statusCode,
-    payload: {
-      ...payload,
-      request_id: message.request_id,
-    },
+    payload: responsePayload,
   });
   return true;
 }
@@ -346,12 +796,13 @@ function handleRequest(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/health") {
-    sendJson(res, 200, {
-      status: "ok",
-      server_time: nowIso(),
-      worker_count: getConnectedWorkers().length,
-      pending_task_count: pendingTasks.size,
-      workers: getConnectedWorkers().map(publicWorker),
+    handleHealth(req, res).catch((error) => {
+      console.error("[server] Health check failed:", error);
+      sendJson(res, 500, {
+        status: "error",
+        error_code: "HEALTH_CHECK_FAILED",
+        message: error.message,
+      });
     });
     return;
   }
@@ -360,6 +811,12 @@ function handleRequest(req, res) {
     sendJson(res, 200, {
       workers: getConnectedWorkers().map(publicWorker),
     });
+    return;
+  }
+
+  const sessionMessagesMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
+  if (req.method === "GET" && sessionMessagesMatch) {
+    handleSessionMessages(req, res, decodeURIComponent(sessionMessagesMatch[1]));
     return;
   }
 
@@ -479,7 +936,9 @@ class WorkerConnection {
 
     if (type === "ai.result" || type === "ai.task_error") {
       console.log(`[server] Worker message: ${type} task=${payload.task_id || ""}`);
-      completePendingTask(message);
+      void completePendingTask(message).catch((error) => {
+        console.error("[server] Complete pending task failed:", error);
+      });
       return;
     }
 
@@ -577,16 +1036,20 @@ class WorkerConnection {
 
       pendingTasks.delete(taskId);
       clearTimeout(pending.timeout);
+      const payload = {
+        task_id: taskId,
+        status: "error",
+        worker_id: this.workerId,
+        error_code: "WORKER_DISCONNECTED",
+        message: "Worker 连接已断开",
+        retryable: true,
+      };
+      void persistTaskError(pending, payload, "error").catch((error) => {
+        console.error(`[server] Failed to persist worker disconnect ${taskId}:`, error);
+      });
       pending.resolve({
         httpStatus: 503,
-        payload: {
-          task_id: taskId,
-          status: "error",
-          worker_id: this.workerId,
-          error_code: "WORKER_DISCONNECTED",
-          message: "Worker 连接已断开",
-          retryable: true,
-        },
+        payload,
       });
     }
 
