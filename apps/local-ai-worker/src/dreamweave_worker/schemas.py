@@ -12,7 +12,9 @@ class StoryContext:
     story_title: str = "黑夜古堡"
     world_setting: str = "中世纪奇幻世界"
     character_setting: str = "用户是失忆的贵族继承人"
-    recent_messages: list[str] = field(default_factory=list)
+    recent_messages: list[Any] = field(default_factory=list)
+    story_state: dict[str, Any] = field(default_factory=dict)
+    story_state_version: int = 0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "StoryContext":
@@ -24,7 +26,9 @@ class StoryContext:
             story_title=str(data.get("story_title") or cls.story_title),
             world_setting=str(data.get("world_setting") or cls.world_setting),
             character_setting=str(data.get("character_setting") or cls.character_setting),
-            recent_messages=[str(item) for item in recent_messages],
+            recent_messages=list(recent_messages) if isinstance(recent_messages, list) else [],
+            story_state=dict(data.get("story_state") or {}),
+            story_state_version=int(data.get("story_state_version") or 0),
         )
 
 
@@ -68,7 +72,9 @@ class AIResult:
     model: str | None = None
     error_code: str | None = None
     message: str | None = None
+    state_update: dict[str, Any] = field(default_factory=dict)
+    agent_trace: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        return {key: value for key, value in data.items() if value is not None}
+        return {key: value for key, value in data.items() if value is not None and value != ""}

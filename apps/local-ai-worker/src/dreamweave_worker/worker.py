@@ -8,11 +8,12 @@ from typing import Any
 
 import httpx
 
+from .agent_nodes import execute_agent_workflow
 from .config import WorkerConfig
 from .ollama_client import OllamaClient
 from .postprocess import clean_story_output
 from .prompt import render_story_prompt
-from .protocol import make_error_message, make_message, make_request_id
+from .protocol import make_error_message, make_message, make_request_id, make_result_message, make_task_error_message
 from .schemas import AIResult, AITask
 
 
@@ -69,6 +70,94 @@ class LocalAIWorker:
                 error_code="TASK_TIMEOUT",
                 message=f"AI 任务处理超时：{timeout:.0f} 秒",
             )
+
+    async def handle_task_with_agent(self, task: AITask) -> AIResult:
+        """Handle task using the new agent workflow."""
+        model = task.model or self.config.ollama_model
+        timeout = self._resolve_task_timeout(task)
+
+        try:
+            return await asyncio.wait_for(self._run_agent_task(task, model), timeout=timeout)
+        except asyncio.TimeoutError:
+            return AIResult(
+                task_id=task.task_id,
+                status="error",
+                model=model,
+                error_code="TASK_TIMEOUT",
+                message=f"AI Agent 任务处理超时：{timeout:.0f} 秒",
+            )
+
+    async def _run_agent_task(self, task: AITask, model: str) -> AIResult:
+        """Run the task using the agent workflow."""
+        async with self.semaphore:
+            try:
+                if task.model:
+                    models = await self.ollama.list_models()
+                    if model not in models:
+                        return AIResult(
+                            task_id=task.task_id,
+                            status="error",
+                            model=model,
+                            error_code="MODEL_NOT_FOUND",
+                            message=f"本地 Ollama 未找到模型：{model}",
+                        )
+
+                task_dict = task.to_dict()
+                task_dict["model"] = model
+
+                # Execute agent workflow
+                result = await asyncio.to_thread(
+                    execute_agent_workflow,
+                    task_dict,
+                    self.ollama,
+                    None  # worlds_path will use default
+                )
+
+                # Convert agent result back to AIResult
+                if result.get('status') == 'success':
+                    return AIResult(
+                        task_id=task.task_id,
+                        status='success',
+                        content=result.get('content', ''),
+                        model=model,
+                        state_update=result.get('state_update'),
+                        agent_trace=result.get('agent_trace')
+                    )
+                else:
+                    return AIResult(
+                        task_id=task.task_id,
+                        status='error',
+                        model=model,
+                        error_code=result.get('error_code', 'AGENT_ERROR'),
+                        message=result.get('error_message', 'Agent workflow failed'),
+                        state_update=result.get('state_update'),
+                        agent_trace=result.get('agent_trace')
+                    )
+
+            except httpx.TimeoutException:
+                return AIResult(
+                    task_id=task.task_id,
+                    status="error",
+                    model=model,
+                    error_code="OLLAMA_TIMEOUT",
+                    message="Ollama 生成超时",
+                )
+            except httpx.HTTPStatusError as exc:
+                return AIResult(
+                    task_id=task.task_id,
+                    status="error",
+                    model=model,
+                    error_code="OLLAMA_HTTP_ERROR",
+                    message=f"Ollama HTTP 错误：{exc.response.status_code}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return AIResult(
+                    task_id=task.task_id,
+                    status="error",
+                    model=model,
+                    error_code="WORKER_ERROR",
+                    message=str(exc),
+                )
 
     async def _run_task(self, task: AITask, model: str) -> AIResult:
         async with self.semaphore:
@@ -286,7 +375,8 @@ class LocalAIWorker:
     async def _run_ws_task(self, websocket: Any, task: AITask, request_id: str | None) -> None:
         started_at = time.perf_counter()
         try:
-            result = await self.handle_task(task)
+            # Use agent workflow for better narrative generation
+            result = await self.handle_task_with_agent(task)
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             await self._safe_send_task_result(websocket, result, request_id, duration_ms=duration_ms)
         except asyncio.CancelledError:
@@ -346,25 +436,33 @@ class LocalAIWorker:
         request_id: str | None,
         duration_ms: int | None = None,
     ) -> None:
-        payload = result.to_dict()
-        payload["worker_id"] = self.config.worker_id
-        if duration_ms is not None:
-            payload["duration_ms"] = duration_ms
-
+        # Use new protocol functions that support state_update and agent_trace
         if result.status == "success":
-            payload.setdefault(
-                "usage",
-                {
-                    "prompt_tokens": None,
-                    "completion_tokens": None,
-                    "total_tokens": None,
-                },
+            await self._send_json(
+                websocket,
+                make_result_message(
+                    task_id=result.task_id,
+                    content=result.content or "",
+                    model=result.model,
+                    worker_id=self.config.worker_id,
+                    request_id=request_id,
+                    state_update=getattr(result, 'state_update', None),
+                    agent_trace=getattr(result, 'agent_trace', None),
+                    duration_ms=duration_ms
+                )
             )
-            await self._send_json(websocket, make_message("ai.result", payload, request_id=request_id))
-            return
-
-        payload["retryable"] = result.error_code in RETRYABLE_ERROR_CODES
-        await self._send_json(websocket, make_message("ai.task_error", payload, request_id=request_id))
+        else:
+            await self._send_json(
+                websocket,
+                make_task_error_message(
+                    task_id=result.task_id,
+                    error_code=result.error_code or "UNKNOWN_ERROR",
+                    message=result.message or "Unknown error",
+                    worker_id=self.config.worker_id,
+                    request_id=request_id,
+                    retryable=result.error_code in RETRYABLE_ERROR_CODES
+                )
+            )
 
     async def _cancel_running_tasks(self) -> None:
         if not self.running_tasks:

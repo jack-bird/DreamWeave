@@ -1,0 +1,44 @@
+{
+  "player": {
+    "name": "玩家角色",
+    "description": "用户扮演的主角",
+    "personality": "勇敢、好奇、有正义感",
+    "background": "神秘的背景故事，可能隐藏着重要的秘密",
+    "abilities": ["潜在的天赋能力", "逐步发展的技能"],
+    "goals": ["探索世界秘密", "发现自身身世", "做出重要选择"]
+  },
+  "narrator": {
+    "name": "叙述者",
+    "role": "旁白",
+    "style": "客观描述场景和事件，营造氛围，提供选择",
+    "tone": "中性的观察者，偶尔提供提示和引导"
+  },
+  "mysterious_stranger": {
+    "name": "神秘陌生人",
+    "description": "身份不明的神秘人物",
+    "personality": "神秘、危险、可能知道重要秘密",
+    "appearance": "遮面，穿着深色斗篷，眼神锐利",
+    "possible_roles": ["隐秘组织成员", "古代守护者", "神秘法师", "时间旅行者"]
+  },
+  "local_guide": {
+    "name": "本地向导",
+    "description": "熟悉当地情况的向导角色",
+    "personality": "友好、知识丰富、可能有自己的目的",
+    "knowledge": ["当地地理", "民间传说", "危险区域", "资源位置"],
+    "attitude": "愿意帮助，但期望回报"
+  },
+  "antagonist": {
+    "name": "反派角色",
+    "description": "故事的主要对立面",
+    "motivations": ["权力欲望", "复仇", "古老信仰", "被迫为恶"],
+    "methods": ["直接对抗", "阴谋诡计", "操控他人", "魔法力量"],
+    "complexity": "不是纯粹的邪恶，有复杂的动机和背景"
+  },
+  "mentor": {
+    "name": "导师角色",
+    "description": "指导和帮助主角的智慧人物",
+    "personality": "经验丰富、耐心、可能有自己的弱点",
+    "teachings": ["战斗技巧", "魔法知识", "生存智慧", "道德选择"],
+    "limitations": "不能代替主角做决定，有自己的责任和限制"
+  }
+}

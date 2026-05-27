@@ -347,6 +347,7 @@ async function persistTaskSuccess(pending, message, responsePayload) {
   const content = cleanText(payload.content, "");
   const model = payload.model || task.model || null;
   const durationMs = Number(payload.duration_ms || Date.now() - pending.startedAt);
+  const stateUpdate = payload.state_update || null;
 
   await withDbTransaction(async (client) => {
     await client.query(
@@ -379,9 +380,26 @@ async function persistTaskSuccess(pending, message, responsePayload) {
           request_id: responsePayload.request_id,
           worker_id: payload.worker_id || pending.workerId,
           usage: payload.usage || null,
+          agent_trace: payload.agent_trace || null,
         }),
       ],
     );
+
+    // Update story state if state_update is provided
+    if (stateUpdate && typeof stateUpdate === 'object') {
+      await client.query(
+        `
+        INSERT INTO story_states (session_id, user_id, story_id, state, version)
+        VALUES ($1, $2, $3, $4::jsonb, 1)
+        ON CONFLICT (session_id) DO UPDATE
+        SET
+          state = story_states.state || EXCLUDED.state,
+          version = story_states.version + 1,
+          updated_at = now()
+        `,
+        [task.session_id, task.user_id, task.story_id, jsonParam(stateUpdate)],
+      );
+    }
 
     await client.query("UPDATE sessions SET updated_at = now() WHERE id = $1", [task.session_id]);
   });
@@ -464,13 +482,122 @@ async function handleSessionMessages(req, res, sessionId) {
   }
 }
 
+async function getStoryState(sessionId) {
+  if (!database.pool) {
+    return null;
+  }
+
+  try {
+    const result = await database.pool.query(
+      `
+      SELECT state, version, created_at, updated_at
+      FROM story_states
+      WHERE session_id = $1
+      `,
+      [sessionId],
+    );
+
+    if (result.rows.length === 0) {
+      return null;
+    }
+
+    return {
+      session_id: sessionId,
+      state: result.rows[0].state,
+      version: result.rows[0].version,
+      created_at: result.rows[0].created_at,
+      updated_at: result.rows[0].updated_at,
+    };
+  } catch (error) {
+    console.error(`[server] Failed to get story state for session ${sessionId}:`, error);
+    return null;
+  }
+}
+
+async function updateStoryState(sessionId, userId, storyId, stateUpdate) {
+  if (!database.pool) {
+    return null;
+  }
+
+  try {
+    return await withDbTransaction(async (client) => {
+      // First, try to get existing state
+      const existingResult = await client.query(
+        `
+        SELECT state, version
+        FROM story_states
+        WHERE session_id = $1
+        FOR UPDATE
+        `,
+        [sessionId],
+      );
+
+      let newState, newVersion;
+
+      if (existingResult.rows.length === 0) {
+        // Create new state
+        newState = stateUpdate;
+        newVersion = 1;
+
+        await client.query(
+          `
+          INSERT INTO story_states (session_id, user_id, story_id, state, version)
+          VALUES ($1, $2, $3, $4::jsonb, $5)
+          `,
+          [sessionId, userId, storyId, JSON.stringify(newState), newVersion],
+        );
+      } else {
+        // Merge state update with existing state
+        const existingState = existingResult.rows[0].state || {};
+        const existingVersion = existingResult.rows[0].version;
+
+        // Deep merge the state update
+        newState = mergeDeep(existingState, stateUpdate);
+        newVersion = existingVersion + 1;
+
+        await client.query(
+          `
+          UPDATE story_states
+          SET state = $2::jsonb, version = $3
+          WHERE session_id = $1
+          `,
+          [sessionId, JSON.stringify(newState), newVersion],
+        );
+      }
+
+      return {
+        session_id: sessionId,
+        state: newState,
+        version: newVersion,
+      };
+    });
+  } catch (error) {
+    console.error(`[server] Failed to update story state for session ${sessionId}:`, error);
+    return null;
+  }
+}
+
+function mergeDeep(target, source) {
+  const result = { ...target };
+
+  for (const key in source) {
+    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+      result[key] = mergeDeep(result[key] || {}, source[key]);
+    } else {
+      result[key] = source[key];
+    }
+  }
+
+  return result;
+}
+
 function sendJson(res, statusCode, payload) {
   const body = JSON.stringify(payload, null, 2);
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(body),
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   });
   res.end(body);
@@ -668,6 +795,44 @@ async function handleStoryContinue(req, res) {
   console.log(`[server] Dispatch task ${task.task_id} to worker ${worker.workerId}, timeout=${timeoutMs}ms`);
 
   try {
+    // Load story state and include it in the task context
+    const storyState = await getStoryState(task.session_id);
+    if (storyState) {
+      task.context.story_state = storyState.state;
+      task.context.story_state_version = storyState.version;
+    } else {
+      // Initialize empty story state if none exists
+      task.context.story_state = {
+        current_world: "default_world",
+        current_scene: "",
+        story_stage: "opening",
+        long_summary: "",
+        characters: {},
+        relationships: {},
+        world_flags: {},
+        inventory: [],
+        pending_events: []
+      };
+      task.context.story_state_version = 0;
+    }
+
+    if (database.pool) {
+      const messagesResult = await database.pool.query(
+        `
+        SELECT role, content
+        FROM messages
+        WHERE session_id = $1
+        ORDER BY created_at ASC, id ASC
+        LIMIT 20
+        `,
+        [task.session_id],
+      );
+      task.context.recent_messages = messagesResult.rows.map(row => ({
+        role: row.role,
+        content: row.content
+      }));
+    }
+
     await persistTaskDispatch(task, worker, requestId, timeoutMs);
   } catch (error) {
     console.error(`[server] Failed to persist task dispatch ${task.task_id}:`, error);
@@ -725,6 +890,85 @@ async function handleStoryContinue(req, res) {
 
   const result = await resultPromise;
   sendJson(res, result.httpStatus, result.payload);
+}
+
+async function handleGetStoryState(req, res, sessionId) {
+  if (!database.pool) {
+    sendJson(res, 200, {
+      session_id: sessionId,
+      persistence_enabled: false,
+      story_state: null,
+    });
+    return;
+  }
+
+  try {
+    const storyState = await getStoryState(sessionId);
+    sendJson(res, 200, {
+      session_id: sessionId,
+      persistence_enabled: true,
+      story_state: storyState ? storyState.state : null,
+      version: storyState ? storyState.version : 0,
+      created_at: storyState ? storyState.created_at : null,
+      updated_at: storyState ? storyState.updated_at : null,
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_READ_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleUpdateStoryState(req, res, sessionId) {
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_REQUEST_BODY",
+      message: error.message,
+    });
+    return;
+  }
+
+  if (!database.pool) {
+    sendJson(res, 200, {
+      session_id: sessionId,
+      persistence_enabled: false,
+      story_state: body.state || {},
+    });
+    return;
+  }
+
+  try {
+    const { user_id, story_id, state } = body;
+    if (!state || typeof state !== 'object') {
+      sendJson(res, 400, {
+        status: "error",
+        error_code: "INVALID_STATE",
+        message: "state object is required",
+      });
+      return;
+    }
+
+    const result = await updateStoryState(sessionId, user_id || "local_user", story_id || "local_story", state);
+    sendJson(res, 200, {
+      session_id: sessionId,
+      persistence_enabled: true,
+      story_state: result ? result.state : state,
+      version: result ? result.version : 0,
+      updated_at: result ? null : new Date().toISOString(),
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_UPDATE_FAILED",
+      message: error.message,
+    });
+  }
 }
 
 async function completePendingTask(message) {
@@ -830,6 +1074,33 @@ function handleRequest(req, res) {
       });
     });
     return;
+  }
+
+  const storyStateMatch = url.pathname.match(/^\/api\/story\/state\/([^/]+)$/);
+  if (storyStateMatch) {
+    const sessionId = decodeURIComponent(storyStateMatch[1]);
+    if (req.method === "GET") {
+      handleGetStoryState(req, res, sessionId).catch((error) => {
+        console.error("[server] Get story state failed:", error);
+        sendJson(res, 500, {
+          status: "error",
+          error_code: "SERVER_ERROR",
+          message: error.message,
+        });
+      });
+      return;
+    }
+    if (req.method === "PUT") {
+      handleUpdateStoryState(req, res, sessionId).catch((error) => {
+        console.error("[server] Update story state failed:", error);
+        sendJson(res, 500, {
+          status: "error",
+          error_code: "SERVER_ERROR",
+          message: error.message,
+        });
+      });
+      return;
+    }
   }
 
   if (tryServeStatic(req, res, url.pathname)) {
