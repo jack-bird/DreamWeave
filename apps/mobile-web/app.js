@@ -18,6 +18,7 @@ const state = {
   model: "qwen3:14b",
   workerReady: false,
   sending: false,
+  savingSettings: false,
 };
 
 const elements = {
@@ -36,6 +37,8 @@ const elements = {
   storyTitleDisplay: document.querySelector("#storyTitleDisplay"),
   worldSetting: document.querySelector("#worldSetting"),
   characterSetting: document.querySelector("#characterSetting"),
+  saveStorySettingsButton: document.querySelector("#saveStorySettingsButton"),
+  settingsSaveStatus: document.querySelector("#settingsSaveStatus"),
   messageList: document.querySelector("#messageList"),
   storyStatePanel: document.querySelector("#storyStatePanel"),
   stateScene: document.querySelector("#stateScene"),
@@ -185,6 +188,15 @@ function setStatus(text, ready) {
 function updateSendState() {
   const hasMessage = elements.messageInput.value.trim().length > 0;
   elements.sendButton.disabled = state.sending || !state.workerReady || !hasMessage;
+}
+
+function updateSettingsSaveState() {
+  elements.saveStorySettingsButton.disabled = state.savingSettings || !state.storyId;
+}
+
+function setSettingsSaveStatus(text, isError = false) {
+  elements.settingsSaveStatus.textContent = text;
+  elements.settingsSaveStatus.classList.toggle("error", Boolean(isError));
 }
 
 function renderMessages() {
@@ -468,6 +480,7 @@ async function selectStory(storyId) {
     renderStoryState(null, 0);
   }
   renderStories();
+  setSettingsSaveStatus("");
   saveState();
 }
 
@@ -631,7 +644,52 @@ async function renameStory(storyId) {
     elements.storyTitleDisplay.textContent = result.story.title;
   }
   await loadStories();
+  setSettingsSaveStatus("");
   saveState();
+}
+
+async function saveStorySettings() {
+  const title = elements.storyTitle.value.trim() || "未命名故事";
+  state.savingSettings = true;
+  updateSettingsSaveState();
+  setSettingsSaveStatus("保存中...");
+
+  try {
+    const response = await fetch(`${API_BASE}/api/stories/${encodeURIComponent(state.storyId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: state.userId,
+        title,
+        world_setting: elements.worldSetting.value.trim(),
+        character_setting: elements.characterSetting.value.trim(),
+        default_model: state.model,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.message || "保存设定失败");
+    }
+
+    const story = result.story;
+    state.stories = state.stories.map((item) => (item.id === story.id ? { ...item, ...story } : item));
+    if (!state.stories.some((item) => item.id === story.id)) {
+      state.stories.unshift(story);
+    }
+    elements.storyTitle.value = story.title || title;
+    elements.storyTitleDisplay.textContent = elements.storyTitle.value;
+    elements.worldSetting.value = story.world_setting || "";
+    elements.characterSetting.value = story.character_setting || "";
+    renderStories();
+    saveState();
+    setSettingsSaveStatus("已保存");
+  } catch (error) {
+    setSettingsSaveStatus(error.message, true);
+    throw error;
+  } finally {
+    state.savingSettings = false;
+    updateSettingsSaveState();
+  }
 }
 
 async function deleteStory(storyId) {
@@ -789,17 +847,28 @@ function bindEvents() {
 
   elements.modelSelect.addEventListener("change", () => {
     state.model = elements.modelSelect.value;
+    setSettingsSaveStatus("未保存");
     saveState();
   });
 
   elements.storyTitle.addEventListener("input", () => {
     elements.storyTitleDisplay.textContent = elements.storyTitle.value.trim() || "未命名故事";
+    setSettingsSaveStatus("未保存");
     saveState();
   });
 
   for (const input of [elements.worldSetting, elements.characterSetting]) {
-    input.addEventListener("input", saveState);
+    input.addEventListener("input", () => {
+      setSettingsSaveStatus("未保存");
+      saveState();
+    });
   }
+
+  elements.saveStorySettingsButton.addEventListener("click", () => {
+    saveStorySettings().catch((error) => {
+      window.alert(error.message);
+    });
+  });
 
   elements.messageInput.addEventListener("input", updateSendState);
 
@@ -831,6 +900,7 @@ function init() {
   bindStoryManagementEvents();
   renderMessages();
   updateSendState();
+  updateSettingsSaveState();
   refreshHealth();
   loadLibrary();
   loadSessionMessages();

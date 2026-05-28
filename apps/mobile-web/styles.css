@@ -265,6 +265,42 @@ h1 {
   font-size: 0.78rem;
 }
 
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.secondary-button {
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid rgba(72, 180, 163, 0.48);
+  border-radius: 8px;
+  background: rgba(72, 180, 163, 0.12);
+  color: #c9f2eb;
+  font-weight: 700;
+}
+
+.secondary-button:disabled {
+  cursor: not-allowed;
+  border-color: #4a4034;
+  background: #211d18;
+  color: #8f806d;
+}
+
+#settingsSaveStatus {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#settingsSaveStatus.error {
+  color: #ffd7d0;
+}
+
 select,
 input,
 textarea {
@@ -497,6 +533,10 @@ textarea:focus {
   }
 
   .settings-panel label:nth-child(n + 3) {
+    grid-column: span 2;
+  }
+
+  .settings-actions {
     grid-column: span 2;
   }
 
