@@ -7,6 +7,11 @@ const DEFAULT_STORY_ID = "local_story";
 const DEFAULT_SESSION_ID = "local_session";
 
 const state = {
+  userId: DEFAULT_USER_ID,
+  storyId: DEFAULT_STORY_ID,
+  sessionId: DEFAULT_SESSION_ID,
+  stories: [],
+  sessions: [],
   messages: [],
   storyState: null,
   storyStateVersion: 0,
@@ -18,6 +23,12 @@ const state = {
 const elements = {
   connectionStatus: document.querySelector("#connectionStatus"),
   workerStatus: document.querySelector("#workerStatus"),
+  libraryToggle: document.querySelector("#libraryToggle"),
+  libraryPanel: document.querySelector("#libraryPanel"),
+  storyList: document.querySelector("#storyList"),
+  sessionList: document.querySelector("#sessionList"),
+  newStoryButton: document.querySelector("#newStoryButton"),
+  newSessionButton: document.querySelector("#newSessionButton"),
   settingsToggle: document.querySelector("#settingsToggle"),
   settingsPanel: document.querySelector("#settingsPanel"),
   modelSelect: document.querySelector("#modelSelect"),
@@ -45,6 +56,8 @@ function loadState() {
   try {
     const saved = JSON.parse(raw);
     state.messages = Array.isArray(saved.messages) ? saved.messages : [];
+    state.storyId = saved.storyId || state.storyId;
+    state.sessionId = saved.sessionId || state.sessionId;
     elements.storyTitle.value = saved.storyTitle || elements.storyTitle.value;
     elements.worldSetting.value = saved.worldSetting || elements.worldSetting.value;
     elements.characterSetting.value = saved.characterSetting || elements.characterSetting.value;
@@ -56,7 +69,7 @@ function loadState() {
 
 async function loadSessionMessages() {
   try {
-    const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(DEFAULT_SESSION_ID)}/messages`, {
+    const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(state.sessionId)}/messages`, {
       cache: "no-store",
     });
     if (!response.ok) {
@@ -86,7 +99,7 @@ async function loadSessionMessages() {
 
 async function loadStoryState() {
   try {
-    const response = await fetch(`${API_BASE}/api/story/state/${encodeURIComponent(DEFAULT_SESSION_ID)}`, {
+    const response = await fetch(`${API_BASE}/api/story/state/${encodeURIComponent(state.sessionId)}`, {
       cache: "no-store",
     });
     if (!response.ok) {
@@ -105,11 +118,55 @@ async function loadStoryState() {
   }
 }
 
+async function loadLibrary() {
+  await loadStories();
+  await loadSessions();
+}
+
+async function loadStories() {
+  try {
+    const response = await fetch(`${API_BASE}/api/stories?user_id=${encodeURIComponent(state.userId)}`, {
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      return;
+    }
+
+    const result = await response.json();
+    state.stories = Array.isArray(result.stories) ? result.stories : [];
+    renderStories();
+  } catch {
+    state.stories = [];
+    renderStories();
+  }
+}
+
+async function loadSessions() {
+  try {
+    const response = await fetch(
+      `${API_BASE}/api/stories/${encodeURIComponent(state.storyId)}/sessions?user_id=${encodeURIComponent(state.userId)}`,
+      { cache: "no-store" },
+    );
+    if (!response.ok) {
+      return;
+    }
+
+    const result = await response.json();
+    state.sessions = Array.isArray(result.sessions) ? result.sessions : [];
+    renderSessions();
+  } catch {
+    state.sessions = [];
+    renderSessions();
+  }
+}
+
 function saveState() {
   localStorage.setItem(
     STORAGE_KEY,
     JSON.stringify({
       messages: state.messages.slice(-30),
+      storyId: state.storyId,
+      sessionId: state.sessionId,
       model: state.model,
       storyTitle: elements.storyTitle.value,
       worldSetting: elements.worldSetting.value,
@@ -149,6 +206,70 @@ function renderMessages() {
   }
 
   elements.messageList.scrollTop = elements.messageList.scrollHeight;
+}
+
+function renderStories() {
+  elements.storyList.replaceChildren();
+
+  if (!state.stories.length) {
+    elements.storyList.append(makeEmptyListNode("暂无故事"));
+    return;
+  }
+
+  for (const story of state.stories) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = story.id === state.storyId ? "library-item active" : "library-item";
+    item.dataset.storyId = story.id;
+    item.innerHTML = `<strong></strong><span></span>`;
+    item.querySelector("strong").textContent = story.title || "未命名故事";
+    item.querySelector("span").textContent = `${story.session_count || 0} 个会话`;
+    elements.storyList.append(item);
+  }
+}
+
+function renderSessions() {
+  elements.sessionList.replaceChildren();
+
+  if (!state.sessions.length) {
+    elements.sessionList.append(makeEmptyListNode("暂无会话"));
+    return;
+  }
+
+  for (const session of state.sessions) {
+    const row = document.createElement("div");
+    row.className = session.id === state.sessionId ? "session-row active" : "session-row";
+
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "library-item";
+    select.dataset.sessionId = session.id;
+    select.innerHTML = `<strong></strong><span></span>`;
+    select.querySelector("strong").textContent = session.title || "未命名会话";
+    select.querySelector("span").textContent = `${session.message_count || 0} 条消息`;
+
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.className = "mini-button";
+    rename.dataset.renameSessionId = session.id;
+    rename.textContent = "改名";
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "mini-button danger";
+    remove.dataset.deleteSessionId = session.id;
+    remove.textContent = "删除";
+
+    row.append(select, rename, remove);
+    elements.sessionList.append(row);
+  }
+}
+
+function makeEmptyListNode(text) {
+  const node = document.createElement("div");
+  node.className = "library-empty";
+  node.textContent = text;
+  return node;
 }
 
 function renderStoryState(storyState, version) {
@@ -277,9 +398,9 @@ async function submitMessage(message) {
       },
       signal: controller.signal,
       body: JSON.stringify({
-        user_id: DEFAULT_USER_ID,
-        session_id: DEFAULT_SESSION_ID,
-        story_id: DEFAULT_STORY_ID,
+        user_id: state.userId,
+        session_id: state.sessionId,
+        story_id: state.storyId,
         model: state.model,
         message,
         timeout_ms: 180000,
@@ -332,9 +453,192 @@ async function submitMessage(message) {
   }
 }
 
+async function createStory() {
+  const title = window.prompt("故事标题", elements.storyTitle.value.trim() || "新的故事");
+  if (!title) {
+    return;
+  }
+
+  const response = await fetch(`${API_BASE}/api/stories`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: state.userId,
+      title,
+      world_setting: elements.worldSetting.value.trim(),
+      character_setting: elements.characterSetting.value.trim(),
+      default_model: state.model,
+    }),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.message || "创建故事失败");
+  }
+
+  state.storyId = result.story.id;
+  elements.storyTitle.value = result.story.title;
+  elements.storyTitleDisplay.textContent = result.story.title;
+  await createSession("新的会话", result.story.id);
+  await loadLibrary();
+  saveState();
+}
+
+async function createSession(title = "新的会话", storyId = state.storyId) {
+  const response = await fetch(`${API_BASE}/api/stories/${encodeURIComponent(storyId)}/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: state.userId,
+      title,
+    }),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.message || "创建会话失败");
+  }
+
+  state.storyId = storyId;
+  state.sessionId = result.session.id;
+  state.messages = [];
+  renderMessages();
+  await loadSessions();
+  await loadStoryState();
+  saveState();
+}
+
+async function selectStory(storyId) {
+  const story = state.stories.find((item) => item.id === storyId);
+  state.storyId = storyId;
+  if (story) {
+    elements.storyTitle.value = story.title || "未命名故事";
+    elements.storyTitleDisplay.textContent = elements.storyTitle.value;
+    elements.worldSetting.value = story.world_setting || elements.worldSetting.value;
+    elements.characterSetting.value = story.character_setting || elements.characterSetting.value;
+  }
+  await loadSessions();
+  const firstSession = state.sessions[0];
+  if (firstSession) {
+    await selectSession(firstSession.id);
+  } else {
+    state.messages = [];
+    renderMessages();
+    renderStoryState(null, 0);
+  }
+  renderStories();
+  saveState();
+}
+
+async function selectSession(sessionId) {
+  state.sessionId = sessionId;
+  state.messages = [];
+  renderMessages();
+  await loadSessionMessages();
+  await loadStoryState();
+  renderSessions();
+  saveState();
+}
+
+async function renameSession(sessionId) {
+  const session = state.sessions.find((item) => item.id === sessionId);
+  const title = window.prompt("会话名称", session?.title || "新的会话");
+  if (!title) {
+    return;
+  }
+
+  const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.message || "重命名失败");
+  }
+  await loadSessions();
+}
+
+async function deleteSession(sessionId) {
+  if (!window.confirm("删除这个会话？")) {
+    return;
+  }
+
+  const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.message || "删除失败");
+  }
+
+  await loadSessions();
+  if (state.sessionId === sessionId) {
+    const next = state.sessions[0];
+    if (next) {
+      await selectSession(next.id);
+    } else {
+      state.messages = [];
+      renderMessages();
+      renderStoryState(null, 0);
+    }
+  }
+}
+
 function bindEvents() {
+  elements.libraryToggle.addEventListener("click", () => {
+    elements.libraryPanel.hidden = !elements.libraryPanel.hidden;
+    if (!elements.libraryPanel.hidden) {
+      void loadLibrary();
+    }
+  });
+
   elements.settingsToggle.addEventListener("click", () => {
     elements.settingsPanel.hidden = !elements.settingsPanel.hidden;
+  });
+
+  elements.newStoryButton.addEventListener("click", () => {
+    createStory().catch((error) => {
+      window.alert(error.message);
+    });
+  });
+
+  elements.newSessionButton.addEventListener("click", () => {
+    createSession().catch((error) => {
+      window.alert(error.message);
+    });
+  });
+
+  elements.storyList.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-story-id]");
+    if (!button) {
+      return;
+    }
+    selectStory(button.dataset.storyId).catch((error) => {
+      window.alert(error.message);
+    });
+  });
+
+  elements.sessionList.addEventListener("click", (event) => {
+    const selectButton = event.target.closest("[data-session-id]");
+    const renameButton = event.target.closest("[data-rename-session-id]");
+    const deleteButton = event.target.closest("[data-delete-session-id]");
+
+    if (selectButton) {
+      selectSession(selectButton.dataset.sessionId).catch((error) => {
+        window.alert(error.message);
+      });
+      return;
+    }
+    if (renameButton) {
+      renameSession(renameButton.dataset.renameSessionId).catch((error) => {
+        window.alert(error.message);
+      });
+      return;
+    }
+    if (deleteButton) {
+      deleteSession(deleteButton.dataset.deleteSessionId).catch((error) => {
+        window.alert(error.message);
+      });
+    }
   });
 
   elements.modelSelect.addEventListener("change", () => {
@@ -381,6 +685,7 @@ function init() {
   renderMessages();
   updateSendState();
   refreshHealth();
+  loadLibrary();
   loadSessionMessages();
   loadStoryState();
   window.setInterval(refreshHealth, 10000);

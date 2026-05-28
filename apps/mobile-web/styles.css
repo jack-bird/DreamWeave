@@ -116,6 +116,124 @@ h1 {
   color: var(--text);
 }
 
+.topbar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.library-panel {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.library-panel[hidden] {
+  display: none;
+}
+
+.library-column {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.panel-heading button,
+.mini-button {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #211d18;
+  color: var(--text);
+  font-size: 0.72rem;
+}
+
+.panel-heading button {
+  padding: 0 10px;
+}
+
+.library-list {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.library-item {
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  padding: 8px 10px;
+  display: grid;
+  gap: 3px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #14120f;
+  color: var(--text);
+}
+
+.library-item.active,
+.session-row.active .library-item {
+  border-color: rgba(215, 168, 79, 0.72);
+  background: rgba(215, 168, 79, 0.1);
+}
+
+.library-item strong,
+.library-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-item strong {
+  font-size: 0.82rem;
+}
+
+.library-item span {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.session-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px 42px;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.mini-button {
+  padding: 0 6px;
+}
+
+.mini-button.danger {
+  border-color: rgba(201, 101, 87, 0.45);
+  color: #ffd7d0;
+}
+
+.library-empty {
+  padding: 12px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .settings-panel {
   display: grid;
   gap: 12px;
@@ -375,5 +493,15 @@ textarea:focus {
 
   .message {
     max-width: 78%;
+  }
+}
+
+@media (max-width: 560px) {
+  .library-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .library-list {
+    max-height: 180px;
   }
 }

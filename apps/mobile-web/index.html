@@ -16,10 +16,32 @@
             <p id="connectionStatus">连接中</p>
           </div>
         </div>
-        <button class="icon-button" id="settingsToggle" type="button" title="设定">
-          <span aria-hidden="true">⚙</span>
-        </button>
+        <div class="topbar-actions">
+          <button class="icon-button" id="libraryToggle" type="button" title="故事与会话">
+            <span aria-hidden="true">☰</span>
+          </button>
+          <button class="icon-button" id="settingsToggle" type="button" title="设定">
+            <span aria-hidden="true">⚙</span>
+          </button>
+        </div>
       </header>
+
+      <section class="library-panel" id="libraryPanel" hidden>
+        <div class="library-column">
+          <div class="panel-heading">
+            <span>故事</span>
+            <button id="newStoryButton" type="button">新建</button>
+          </div>
+          <div class="library-list" id="storyList"></div>
+        </div>
+        <div class="library-column">
+          <div class="panel-heading">
+            <span>会话</span>
+            <button id="newSessionButton" type="button">新建</button>
+          </div>
+          <div class="library-list" id="sessionList"></div>
+        </div>
+      </section>
 
       <section class="settings-panel" id="settingsPanel" hidden>
         <label>
