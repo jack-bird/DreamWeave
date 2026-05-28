@@ -98,9 +98,9 @@ class PlanNarrativeNode(AgentNode):
         # Update story stage if needed
         current_stage = state.story_state.story_stage
         if current_stage == "opening" and narrative_focus in ["movement_transition", "exploration_discovery"]:
-            state.state_update['story_stage'] = "inciting_incident"
+            state.planned_state_update['story_stage'] = "inciting_incident"
         elif current_stage == "inciting_incident" and narrative_focus == "action_combat":
-            state.state_update['story_stage'] = "rising_action"
+            state.planned_state_update['story_stage'] = "rising_action"
         
         # Create simple narrative plan
         plan = f"""
@@ -233,6 +233,8 @@ class QualityCheckAndUpdateStateNode(AgentNode):
             state.quality_passed = False
             state.quality_issues.append("Empty response")
             return state
+
+        state.state_update = dict(state.planned_state_update)
         
         # Perform quality checks
         issues = []
@@ -355,6 +357,79 @@ class QualityCheckAndUpdateStateNode(AgentNode):
         return value
 
 
+class ReviseStoryNode(AgentNode):
+    """Revise the story once when hard quality checks fail."""
+
+    def __init__(self, ollama_client=None, max_revisions: int = 1):
+        self.ollama_client = ollama_client
+        self.max_revisions = max_revisions
+
+    def __call__(self, state: AgentState) -> AgentState:
+        if state.quality_passed or not state.final_response:
+            return state
+
+        if state.revision_count >= self.max_revisions:
+            state.agent_trace['revision_skipped'] = 'max_revisions_reached'
+            return state
+
+        if not self.ollama_client:
+            state.agent_trace['revision_skipped'] = 'ollama_client_missing'
+            return state
+
+        try:
+            response = asyncio.run(
+                self.ollama_client.generate(
+                    self._build_revision_prompt(state),
+                    model=state.model,
+                    generation_options={
+                        'num_predict': 420,
+                        'temperature': 0.55,
+                        'top_p': 0.85,
+                    },
+                )
+            )
+
+            if response:
+                state.draft_response = state.final_response
+                state.final_response = response.strip()
+                state.revision_count += 1
+                state.quality_passed = True
+                state.quality_issues = []
+                state.error_message = ""
+                state.agent_trace['revision_attempted'] = True
+                state.agent_trace['revision_count'] = state.revision_count
+                state.agent_trace['revision_reason'] = state.agent_trace.get('quality_issues', [])
+        except Exception as exc:  # noqa: BLE001
+            state.agent_trace['revision_error'] = str(exc)
+
+        return state
+
+    def _build_revision_prompt(self, state: AgentState) -> str:
+        issues = "；".join(state.quality_issues) or "质量检查未通过"
+        return f"""请重写下面这段互动小说正文，使其通过质量检查。
+
+质量问题：
+{issues}
+
+玩家行动：
+{state.user_input}
+
+当前场景：
+{state.story_state.current_scene or '未知地点'}
+
+原文：
+{state.final_response}
+
+重写规则：
+1. 只输出中文小说正文。
+2. 不要写“你决定”“你感到”“你认为”“你想要”。
+3. 不要替玩家做下一步决定。
+4. 保留玩家行动带来的直接后果和外部环境变化。
+5. 长度控制在 200 到 400 个中文字符。
+
+请直接输出重写后的正文："""
+
+
 class ReturnResponseNode(AgentNode):
     """Prepare the final response for return to server."""
     
@@ -363,7 +438,7 @@ class ReturnResponseNode(AgentNode):
         
         # Prepare trace information
         state.agent_trace['completed_at'] = datetime.now().isoformat()
-        state.agent_trace['total_nodes'] = 5
+        state.agent_trace['total_nodes'] = 7
         state.agent_trace['quality_passed'] = state.quality_passed
         
         # Ensure we have content to return
@@ -381,6 +456,8 @@ def create_agent_workflow(ollama_client=None, worlds_path: str = None):
         RetrieveLoreNode(worlds_path),
         PlanNarrativeNode(),
         GenerateStoryNode(ollama_client),
+        QualityCheckAndUpdateStateNode(),
+        ReviseStoryNode(ollama_client),
         QualityCheckAndUpdateStateNode(),
         ReturnResponseNode()
     ]

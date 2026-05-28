@@ -76,10 +76,12 @@ class AgentState:
     
     # Output data
     state_update: Dict[str, Any] = field(default_factory=dict)
+    planned_state_update: Dict[str, Any] = field(default_factory=dict)
     
     # Quality check
     quality_passed: bool = True
     quality_issues: List[str] = field(default_factory=list)
+    revision_count: int = 0
     
     # Metadata
     agent_trace: Dict[str, Any] = field(default_factory=dict)
@@ -105,8 +107,10 @@ class AgentState:
             "draft_response": self.draft_response,
             "final_response": self.final_response,
             "state_update": self.state_update,
+            "planned_state_update": self.planned_state_update,
             "quality_passed": self.quality_passed,
             "quality_issues": self.quality_issues,
+            "revision_count": self.revision_count,
             "agent_trace": self.agent_trace,
             "error_message": self.error_message
         }
