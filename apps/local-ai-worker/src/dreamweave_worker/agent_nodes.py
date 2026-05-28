@@ -1,12 +1,11 @@
 """Agent nodes for the narrative generation workflow."""
 
 import asyncio
-import json
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any
 from datetime import datetime
 
-from .agent_state import AgentState, StoryState
+from .agent_state import AgentState
 from .lore import LoreSystem, SimpleLoreRetriever
 
 
@@ -23,7 +22,6 @@ class LoadContextNode(AgentNode):
     
     def __call__(self, state: AgentState) -> AgentState:
         """Load context from the task and prepare it for generation."""
-        # Prepare recent history context
         history_context = []
         for msg in state.recent_history[-10:]:  # Last 10 messages
             role = msg.get('role', 'unknown')
@@ -35,6 +33,7 @@ class LoadContextNode(AgentNode):
         
         state.agent_trace['history_loaded'] = len(state.recent_history)
         state.agent_trace['context_prepared'] = True
+        state.agent_trace['history_context_chars'] = len("\n".join(history_context))
         
         return state
 
@@ -149,7 +148,7 @@ class GenerateStoryNode(AgentNode):
                     prompt,
                     model=state.model,
                     generation_options={
-                    'num_predict': 500,
+                    'num_predict': 420,
                     'temperature': 0.7,
                     'top_p': 0.9,
                     }
@@ -191,35 +190,35 @@ class GenerateStoryNode(AgentNode):
         plan_text = state.narrative_plan if state.narrative_plan else "Continue the story naturally."
         
         # Build the complete prompt
-        prompt = f"""You are a narrator for an interactive fiction story. The player has just taken an action, and you need to describe what happens next.
+        prompt = f"""你是互动小说叙事引擎。玩家刚刚做出一个行动，你需要描写这个行动带来的直接结果。
 
 {lore_text}
 
 {history_text}
 
-CURRENT SITUATION:
-- Player Action: {state.user_input}
-- Current Location: {state.story_state.current_scene or 'Unknown location'}
-- Story Stage: {state.story_state.story_stage}
+当前局面：
+- 玩家行动：{state.user_input}
+- 当前地点：{state.story_state.current_scene or '未知地点'}
+- 剧情阶段：{state.story_state.story_stage}
 
 {plan_text}
 
-WORLD SETTING:
+世界设定：
 {state.world_setting}
 
-CHARACTER SETTING:
+角色设定：
 {state.character_setting}
 
-IMPORTANT RULES:
-1. Use second-person perspective ("你") to address the player
-2. Never describe the player's thoughts or feelings
-3. Never make decisions for the player
-4. Describe what happens as a result of their action
-5. Maintain atmosphere and world consistency
-6. Keep responses engaging but not too long (200-400 characters)
-7. End with an open situation that invites further action
+输出规则：
+1. 只输出中文小说正文，不要标题、列表、选项或系统说明。
+2. 使用第二人称“你”指代玩家。
+3. 不要描写玩家的想法、感受或替玩家决定下一步行动。
+4. 只描写玩家行动造成的直接后果、环境反馈和 NPC / 事件变化。
+5. 保持世界观一致，不引入现代物品或无关设定。
+6. 长度控制在 200 到 400 个中文字符。
+7. 结尾停在开放局面，让玩家自己决定下一步。
 
-Generate the next part of the story:"""
+请直接生成下一段正文："""
 
         return prompt
 
@@ -263,9 +262,18 @@ class QualityCheckAndUpdateStateNode(AgentNode):
             if term in state.final_response:
                 issues.append(f"Modern term: {term}")
         
-        # Update quality status
+        # Update quality status. Soft issues are reported in trace, but only
+        # critical generation failures should turn a usable story paragraph into
+        # a task error.
         state.quality_issues = issues
-        state.quality_passed = len(issues) == 0
+        hard_issue_prefixes = (
+            "Making decisions",
+            "Describing player feelings",
+            "Describing player thoughts",
+            "Describing player desires",
+            "Response too short",
+        )
+        state.quality_passed = not any(issue.startswith(hard_issue_prefixes) for issue in issues)
         
         # Generate state updates based on content
         self._generate_state_updates(state)
@@ -278,37 +286,28 @@ class QualityCheckAndUpdateStateNode(AgentNode):
     def _generate_state_updates(self, state: AgentState):
         """Generate state updates based on the generated content."""
         
-        # Extract potential scene changes
-        scene_keywords = ['进入', '来到', '走出', '到达', '穿越到']
-        for keyword in scene_keywords:
-            if keyword in state.final_response:
-                # Try to extract location name
-                match = re.search(f'{keyword}([^，。]+?)(?:，|。|$)', state.final_response)
-                if match:
-                    new_scene = match.group(1).strip()
-                    if len(new_scene) < 20 and len(new_scene) > 2:
-                        state.state_update['current_scene'] = new_scene
-                        break
+        new_scene = self._extract_scene_change(state.final_response)
+        if new_scene:
+            state.state_update['current_scene'] = new_scene
         
         # Update world flags based on actions
         if any(word in state.user_input for word in ['打开', '启动', '激活']):
             # Extract what was opened/activated
-            match = re.search(r'(打开|启动|激活)([^，。]+?)(?:，|。|$)', state.user_input)
+            match = re.search(r'(打开|启动|激活)([^，。；;!?！？]+?)(?:[，。；;!?！？]|$)', state.user_input)
             if match:
-                item = match.group(2).strip()
+                item = self._clean_state_text(match.group(2), max_length=24)
                 flag_key = f"{item}_opened".lower().replace(" ", "_")
                 state.state_update['world_flags'] = state.state_update.get('world_flags', {})
                 state.state_update['world_flags'][flag_key] = True
         
         # Add pending events if interesting things happened
-        interest_keywords = ['听到', '看到', '发现', '感觉', '注意到']
+        interest_keywords = ['听到', '看到', '发现', '注意到']
         for keyword in interest_keywords:
             if keyword in state.final_response:
-                # Extract what was noticed
-                match = re.search(f'{keyword}([^，。]+?)(?:，|。|$)', state.final_response)
+                match = re.search(f'{keyword}([^，。；;!?！？]+?)(?:[，。；;!?！？]|$)', state.final_response)
                 if match:
-                    event = match.group(1).strip()
-                    if len(event) < 50:
+                    event = self._clean_state_text(f"{keyword}{match.group(1)}", max_length=60)
+                    if event:
                         pending_events = state.state_update.get('pending_events', [])
                         pending_events.append(event)
                         state.state_update['pending_events'] = pending_events[-3:]  # Keep last 3
@@ -316,12 +315,44 @@ class QualityCheckAndUpdateStateNode(AgentNode):
         
         # Update long summary periodically
         if len(state.final_response) > 200:
-            summary_snippet = state.final_response[:200] + "..."
-            current_summary = state.story_state.long_summary
-            if len(current_summary) < 1000:  # Keep summary under 1000 chars
-                state.state_update['long_summary'] = current_summary + "\\n" + summary_snippet
-            else:
-                state.state_update['long_summary'] = summary_snippet  # Replace if too long
+            summary_snippet = self._clean_state_text(state.final_response[:220], max_length=220)
+            current_summary = state.story_state.long_summary.strip()
+            combined = f"{current_summary}\n{summary_snippet}" if current_summary else summary_snippet
+            state.state_update['long_summary'] = combined[-1200:]
+
+    def _extract_scene_change(self, text: str) -> str:
+        """Extract only explicit location transitions."""
+        patterns = [
+            r'(?:进入|来到|到达|抵达|走进)([^，。；;!?！？]{2,24})',
+            r'(?:走出|离开)([^，。；;!?！？]{2,24})',
+            r'(?:穿越到)([^，。；;!?！？]{2,24})',
+        ]
+        location_suffixes = (
+            '门', '厅', '室', '房', '廊', '庭', '院', '塔', '堡', '城',
+            '桥', '路', '林', '谷', '村', '镇', '街', '广场', '祭坛', '大厅'
+        )
+
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if not match:
+                continue
+
+            candidate = self._clean_state_text(match.group(1), max_length=24)
+            if not candidate:
+                continue
+            if any(verb in candidate for verb in ('看到', '听到', '发现', '注意到', '传来', '伸手')):
+                continue
+            if candidate.endswith(location_suffixes) or any(suffix in candidate for suffix in location_suffixes):
+                return candidate
+
+        return ""
+
+    def _clean_state_text(self, value: str, max_length: int) -> str:
+        value = re.sub(r'\s+', '', value or '')
+        value = value.strip(' ：:“”"\'，。；;!?！？、')
+        if not value or len(value) > max_length:
+            return ""
+        return value
 
 
 class ReturnResponseNode(AgentNode):

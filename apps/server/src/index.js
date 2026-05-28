@@ -385,20 +385,8 @@ async function persistTaskSuccess(pending, message, responsePayload) {
       ],
     );
 
-    // Update story state if state_update is provided
     if (stateUpdate && typeof stateUpdate === 'object') {
-      await client.query(
-        `
-        INSERT INTO story_states (session_id, user_id, story_id, state, version)
-        VALUES ($1, $2, $3, $4::jsonb, 1)
-        ON CONFLICT (session_id) DO UPDATE
-        SET
-          state = story_states.state || EXCLUDED.state,
-          version = story_states.version + 1,
-          updated_at = now()
-        `,
-        [task.session_id, task.user_id, task.story_id, jsonParam(stateUpdate)],
-      );
+      await upsertStoryState(client, task.session_id, task.user_id, task.story_id, stateUpdate);
     }
 
     await client.query("UPDATE sessions SET updated_at = now() WHERE id = $1", [task.session_id]);
@@ -521,55 +509,7 @@ async function updateStoryState(sessionId, userId, storyId, stateUpdate) {
 
   try {
     return await withDbTransaction(async (client) => {
-      // First, try to get existing state
-      const existingResult = await client.query(
-        `
-        SELECT state, version
-        FROM story_states
-        WHERE session_id = $1
-        FOR UPDATE
-        `,
-        [sessionId],
-      );
-
-      let newState, newVersion;
-
-      if (existingResult.rows.length === 0) {
-        // Create new state
-        newState = stateUpdate;
-        newVersion = 1;
-
-        await client.query(
-          `
-          INSERT INTO story_states (session_id, user_id, story_id, state, version)
-          VALUES ($1, $2, $3, $4::jsonb, $5)
-          `,
-          [sessionId, userId, storyId, JSON.stringify(newState), newVersion],
-        );
-      } else {
-        // Merge state update with existing state
-        const existingState = existingResult.rows[0].state || {};
-        const existingVersion = existingResult.rows[0].version;
-
-        // Deep merge the state update
-        newState = mergeDeep(existingState, stateUpdate);
-        newVersion = existingVersion + 1;
-
-        await client.query(
-          `
-          UPDATE story_states
-          SET state = $2::jsonb, version = $3
-          WHERE session_id = $1
-          `,
-          [sessionId, JSON.stringify(newState), newVersion],
-        );
-      }
-
-      return {
-        session_id: sessionId,
-        state: newState,
-        version: newVersion,
-      };
+      return await upsertStoryState(client, sessionId, userId, storyId, stateUpdate);
     });
   } catch (error) {
     console.error(`[server] Failed to update story state for session ${sessionId}:`, error);
@@ -577,18 +517,135 @@ async function updateStoryState(sessionId, userId, storyId, stateUpdate) {
   }
 }
 
+async function upsertStoryState(client, sessionId, userId, storyId, stateUpdate) {
+  const existingResult = await client.query(
+    `
+    SELECT state, version
+    FROM story_states
+    WHERE session_id = $1
+    FOR UPDATE
+    `,
+    [sessionId],
+  );
+
+  const sanitizedUpdate = sanitizeStoryStateUpdate(stateUpdate);
+  let newState;
+  let newVersion;
+
+  if (existingResult.rows.length === 0) {
+    newState = sanitizedUpdate;
+    newVersion = 1;
+
+    await client.query(
+      `
+      INSERT INTO story_states (session_id, user_id, story_id, state, version)
+      VALUES ($1, $2, $3, $4::jsonb, $5)
+      `,
+      [sessionId, userId, storyId, JSON.stringify(newState), newVersion],
+    );
+  } else {
+    const existingState = existingResult.rows[0].state || {};
+    const existingVersion = existingResult.rows[0].version;
+    newState = mergeStoryState(existingState, sanitizedUpdate);
+    newVersion = existingVersion + 1;
+
+    await client.query(
+      `
+      UPDATE story_states
+      SET state = $2::jsonb, version = $3, updated_at = now()
+      WHERE session_id = $1
+      `,
+      [sessionId, JSON.stringify(newState), newVersion],
+    );
+  }
+
+  return {
+    session_id: sessionId,
+    state: newState,
+    version: newVersion,
+  };
+}
+
+function sanitizeStoryStateUpdate(update) {
+  const allowedKeys = new Set([
+    "current_world",
+    "current_scene",
+    "story_stage",
+    "long_summary",
+    "characters",
+    "relationships",
+    "world_flags",
+    "inventory",
+    "pending_events",
+  ]);
+  const sanitized = {};
+
+  for (const [key, value] of Object.entries(update || {})) {
+    if (allowedKeys.has(key) && value !== undefined && value !== null) {
+      sanitized[key] = value;
+    }
+  }
+
+  return sanitized;
+}
+
+function mergeStoryState(target, source) {
+  const result = mergeDeep(target || {}, source || {});
+
+  if (Array.isArray(target?.pending_events) || Array.isArray(source?.pending_events)) {
+    result.pending_events = mergeUniqueStrings(target?.pending_events, source?.pending_events, 10);
+  }
+
+  if (Array.isArray(target?.inventory) || Array.isArray(source?.inventory)) {
+    result.inventory = mergeUniqueValues(target?.inventory, source?.inventory, 50);
+  }
+
+  if (typeof source?.long_summary === "string") {
+    result.long_summary = source.long_summary.slice(-1200);
+  }
+
+  return result;
+}
+
 function mergeDeep(target, source) {
   const result = { ...target };
 
-  for (const key in source) {
-    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
-      result[key] = mergeDeep(result[key] || {}, source[key]);
+  for (const key in source || {}) {
+    if (isPlainObject(source[key])) {
+      result[key] = mergeDeep(isPlainObject(result[key]) ? result[key] : {}, source[key]);
     } else {
       result[key] = source[key];
     }
   }
 
   return result;
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function mergeUniqueStrings(left, right, limit) {
+  const values = [...(left || []), ...(right || [])]
+    .filter((value) => typeof value === "string" && value.trim())
+    .map((value) => value.trim());
+  return [...new Set(values)].slice(-limit);
+}
+
+function mergeUniqueValues(left, right, limit) {
+  const seen = new Set();
+  const result = [];
+
+  for (const item of [...(left || []), ...(right || [])]) {
+    const key = JSON.stringify(item);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(item);
+  }
+
+  return result.slice(-limit);
 }
 
 function sendJson(res, statusCode, payload) {
