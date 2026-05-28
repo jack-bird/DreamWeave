@@ -8,6 +8,8 @@ const DEFAULT_SESSION_ID = "local_session";
 
 const state = {
   messages: [],
+  storyState: null,
+  storyStateVersion: 0,
   model: "qwen3:14b",
   workerReady: false,
   sending: false,
@@ -24,6 +26,11 @@ const elements = {
   worldSetting: document.querySelector("#worldSetting"),
   characterSetting: document.querySelector("#characterSetting"),
   messageList: document.querySelector("#messageList"),
+  storyStatePanel: document.querySelector("#storyStatePanel"),
+  stateScene: document.querySelector("#stateScene"),
+  stateStage: document.querySelector("#stateStage"),
+  stateEvents: document.querySelector("#stateEvents"),
+  stateSummary: document.querySelector("#stateSummary"),
   composer: document.querySelector("#composer"),
   messageInput: document.querySelector("#messageInput"),
   sendButton: document.querySelector("#sendButton"),
@@ -77,6 +84,27 @@ async function loadSessionMessages() {
   }
 }
 
+async function loadStoryState() {
+  try {
+    const response = await fetch(`${API_BASE}/api/story/state/${encodeURIComponent(DEFAULT_SESSION_ID)}`, {
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      return;
+    }
+
+    const result = await response.json();
+    if (!result.persistence_enabled || !result.story_state) {
+      renderStoryState(null, 0);
+      return;
+    }
+
+    renderStoryState(result.story_state, result.version || 0);
+  } catch {
+    renderStoryState(null, 0);
+  }
+}
+
 function saveState() {
   localStorage.setItem(
     STORAGE_KEY,
@@ -121,6 +149,45 @@ function renderMessages() {
   }
 
   elements.messageList.scrollTop = elements.messageList.scrollHeight;
+}
+
+function renderStoryState(storyState, version) {
+  state.storyState = storyState;
+  state.storyStateVersion = version;
+
+  if (!storyState) {
+    elements.storyStatePanel.hidden = true;
+    return;
+  }
+
+  elements.storyStatePanel.hidden = false;
+  elements.stateScene.textContent = storyState.current_scene || "未知";
+  elements.stateStage.textContent = storyState.story_stage || "opening";
+
+  const pendingEvents = Array.isArray(storyState.pending_events) ? storyState.pending_events.filter(Boolean) : [];
+  if (pendingEvents.length) {
+    elements.stateEvents.hidden = false;
+    elements.stateEvents.replaceChildren(
+      ...pendingEvents.slice(-3).map((eventText) => {
+        const node = document.createElement("span");
+        node.textContent = eventText;
+        return node;
+      }),
+    );
+  } else {
+    elements.stateEvents.hidden = true;
+    elements.stateEvents.replaceChildren();
+  }
+
+  const summary = typeof storyState.long_summary === "string" ? storyState.long_summary.trim() : "";
+  elements.stateSummary.textContent = summary ? trimText(summary, 140) : `状态版本 ${version}`;
+}
+
+function trimText(value, maxLength) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(-maxLength).replace(/^\S{0,12}/, "").trim()}...`;
 }
 
 function setLoadingMessage(visible) {
@@ -244,6 +311,9 @@ async function submitMessage(message) {
       taskId: result.task_id,
       createdAt: new Date().toISOString(),
     });
+    if (result.state_update) {
+      await loadStoryState();
+    }
   } catch (error) {
     state.messages.push({
       role: "error",
@@ -256,6 +326,9 @@ async function submitMessage(message) {
     saveState();
     renderMessages();
     updateSendState();
+    if (!state.sending) {
+      void loadStoryState();
+    }
   }
 }
 
@@ -309,6 +382,7 @@ function init() {
   updateSendState();
   refreshHealth();
   loadSessionMessages();
+  loadStoryState();
   window.setInterval(refreshHealth, 10000);
 }
 
