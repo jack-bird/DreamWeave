@@ -200,6 +200,33 @@ function userNickname(userId) {
   return userId || "用户";
 }
 
+function requireDatabase(res) {
+  if (database.pool) {
+    return true;
+  }
+
+  sendJson(res, 503, {
+    status: "error",
+    error_code: "DATABASE_UNAVAILABLE",
+    message: database.configured
+      ? database.error || "PostgreSQL is configured but unavailable"
+      : "PostgreSQL is not configured",
+  });
+  return false;
+}
+
+async function ensureUser(client, userId) {
+  await client.query(
+    `
+    INSERT INTO users (id, nickname)
+    VALUES ($1, $2)
+    ON CONFLICT (id) DO UPDATE
+    SET nickname = EXCLUDED.nickname
+    `,
+    [userId, userNickname(userId)],
+  );
+}
+
 async function persistTaskDispatch(task, worker, requestId, timeoutMs) {
   if (!database.pool) {
     if (database.configured) {
@@ -668,7 +695,7 @@ function sendJson(res, statusCode, payload) {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(body),
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   });
   res.end(body);
@@ -821,6 +848,344 @@ function buildAITask(body) {
       ...(body.context || {}),
     },
   };
+}
+
+async function handleListStories(req, res) {
+  if (!database.pool) {
+    sendJson(res, 200, {
+      persistence_enabled: false,
+      stories: [],
+    });
+    return;
+  }
+
+  const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
+  const userId = cleanText(url.searchParams.get("user_id"), "local_user");
+
+  try {
+    const result = await database.pool.query(
+      `
+      SELECT
+        s.id,
+        s.user_id,
+        s.title,
+        s.world_setting,
+        s.character_setting,
+        s.default_model,
+        s.generation_options,
+        s.created_at,
+        s.updated_at,
+        COUNT(sess.id)::integer AS session_count
+      FROM stories s
+      LEFT JOIN sessions sess ON sess.story_id = s.id AND sess.status <> 'deleted'
+      WHERE s.user_id = $1
+      GROUP BY s.id
+      ORDER BY s.updated_at DESC, s.created_at DESC
+      LIMIT 100
+      `,
+      [userId],
+    );
+
+    sendJson(res, 200, {
+      persistence_enabled: true,
+      stories: result.rows,
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_READ_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleCreateStory(req, res) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_REQUEST_BODY",
+      message: error.message,
+    });
+    return;
+  }
+
+  const userId = cleanText(body.user_id, "local_user");
+  const storyId = cleanText(body.story_id || body.id, makeId("story"));
+  const title = cleanText(body.title, "新的故事");
+  const worldSetting = cleanText(body.world_setting, "");
+  const characterSetting = cleanText(body.character_setting, "");
+  const defaultModel = cleanText(body.default_model || body.model, null);
+  const generationOptions = body.generation_options || {};
+
+  try {
+    const story = await withDbTransaction(async (client) => {
+      await ensureUser(client, userId);
+      const result = await client.query(
+        `
+        INSERT INTO stories (
+          id,
+          user_id,
+          title,
+          world_setting,
+          character_setting,
+          default_model,
+          generation_options
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+        ON CONFLICT (id) DO UPDATE
+        SET
+          title = EXCLUDED.title,
+          world_setting = EXCLUDED.world_setting,
+          character_setting = EXCLUDED.character_setting,
+          default_model = EXCLUDED.default_model,
+          generation_options = EXCLUDED.generation_options
+        RETURNING *
+        `,
+        [storyId, userId, title, worldSetting, characterSetting, defaultModel, jsonParam(generationOptions)],
+      );
+      return result.rows[0];
+    });
+
+    sendJson(res, 201, {
+      status: "success",
+      story,
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleListStorySessions(req, res, storyId) {
+  if (!database.pool) {
+    sendJson(res, 200, {
+      persistence_enabled: false,
+      story_id: storyId,
+      sessions: [],
+    });
+    return;
+  }
+
+  const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
+  const userId = cleanText(url.searchParams.get("user_id"), "local_user");
+
+  try {
+    const result = await database.pool.query(
+      `
+      SELECT
+        sess.id,
+        sess.user_id,
+        sess.story_id,
+        sess.title,
+        sess.status,
+        sess.created_at,
+        sess.updated_at,
+        COUNT(msg.id)::integer AS message_count
+      FROM sessions sess
+      LEFT JOIN messages msg ON msg.session_id = sess.id
+      WHERE sess.story_id = $1 AND sess.user_id = $2 AND sess.status <> 'deleted'
+      GROUP BY sess.id
+      ORDER BY sess.updated_at DESC, sess.created_at DESC
+      LIMIT 100
+      `,
+      [storyId, userId],
+    );
+
+    sendJson(res, 200, {
+      persistence_enabled: true,
+      story_id: storyId,
+      sessions: result.rows,
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_READ_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleCreateStorySession(req, res, storyId) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_REQUEST_BODY",
+      message: error.message,
+    });
+    return;
+  }
+
+  const userId = cleanText(body.user_id, "local_user");
+  const sessionId = cleanText(body.session_id || body.id, makeId("session"));
+  const title = cleanText(body.title, "新的会话");
+
+  try {
+    const session = await withDbTransaction(async (client) => {
+      const storyResult = await client.query(
+        `
+        SELECT id
+        FROM stories
+        WHERE id = $1 AND user_id = $2
+        `,
+        [storyId, userId],
+      );
+      if (!storyResult.rows.length) {
+        throw new Error(`Story not found: ${storyId}`);
+      }
+
+      const result = await client.query(
+        `
+        INSERT INTO sessions (id, user_id, story_id, title, status)
+        VALUES ($1, $2, $3, $4, 'active')
+        ON CONFLICT (id) DO UPDATE
+        SET
+          title = EXCLUDED.title,
+          status = 'active',
+          story_id = EXCLUDED.story_id
+        RETURNING *
+        `,
+        [sessionId, userId, storyId, title],
+      );
+      return result.rows[0];
+    });
+
+    sendJson(res, 201, {
+      status: "success",
+      session,
+    });
+  } catch (error) {
+    sendJson(res, error.message.startsWith("Story not found") ? 404 : 500, {
+      status: "error",
+      error_code: error.message.startsWith("Story not found") ? "STORY_NOT_FOUND" : "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleUpdateSession(req, res, sessionId) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_REQUEST_BODY",
+      message: error.message,
+    });
+    return;
+  }
+
+  const title = cleanText(body.title, null);
+  const status = cleanText(body.status, null);
+  if (!title && !status) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_REQUEST",
+      message: "title or status is required",
+    });
+    return;
+  }
+  if (status && !["active", "archived", "deleted"].includes(status)) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_STATUS",
+      message: "status must be active, archived, or deleted",
+    });
+    return;
+  }
+
+  try {
+    const result = await database.pool.query(
+      `
+      UPDATE sessions
+      SET
+        title = COALESCE($2, title),
+        status = COALESCE($3, status)
+      WHERE id = $1
+      RETURNING *
+      `,
+      [sessionId, title, status],
+    );
+
+    if (!result.rows.length) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "SESSION_NOT_FOUND",
+        message: `Session not found: ${sessionId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      status: "success",
+      session: result.rows[0],
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleDeleteSession(req, res, sessionId) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  try {
+    const result = await database.pool.query(
+      `
+      UPDATE sessions
+      SET status = 'deleted'
+      WHERE id = $1
+      RETURNING *
+      `,
+      [sessionId],
+    );
+
+    if (!result.rows.length) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "SESSION_NOT_FOUND",
+        message: `Session not found: ${sessionId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      status: "success",
+      session: result.rows[0],
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
 }
 
 async function handleStoryContinue(req, res) {
@@ -1129,6 +1494,43 @@ function handleRequest(req, res) {
       workers: getConnectedWorkers().map(publicWorker),
     });
     return;
+  }
+
+  if (url.pathname === "/api/stories") {
+    if (req.method === "GET") {
+      handleListStories(req, res);
+      return;
+    }
+    if (req.method === "POST") {
+      handleCreateStory(req, res);
+      return;
+    }
+  }
+
+  const storySessionsMatch = url.pathname.match(/^\/api\/stories\/([^/]+)\/sessions$/);
+  if (storySessionsMatch) {
+    const storyId = decodeURIComponent(storySessionsMatch[1]);
+    if (req.method === "GET") {
+      handleListStorySessions(req, res, storyId);
+      return;
+    }
+    if (req.method === "POST") {
+      handleCreateStorySession(req, res, storyId);
+      return;
+    }
+  }
+
+  const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
+  if (sessionMatch) {
+    const sessionId = decodeURIComponent(sessionMatch[1]);
+    if (req.method === "PUT") {
+      handleUpdateSession(req, res, sessionId);
+      return;
+    }
+    if (req.method === "DELETE") {
+      handleDeleteSession(req, res, sessionId);
+      return;
+    }
   }
 
   const sessionMessagesMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);

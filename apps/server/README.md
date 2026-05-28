@@ -90,6 +90,54 @@ Invoke-RestMethod `
 /api/sessions/local_session/messages
 ```
 
+### `GET /api/stories?user_id=local_user`
+
+读取某个用户的故事列表，包含每个故事的会话数量。
+
+### `POST /api/stories`
+
+创建或更新故事。
+
+```json
+{
+  "user_id": "local_user",
+  "title": "黑夜古堡",
+  "world_setting": "中世纪奇幻世界",
+  "character_setting": "用户是失忆的贵族继承人",
+  "default_model": "llama33-novel:latest"
+}
+```
+
+### `GET /api/stories/:story_id/sessions?user_id=local_user`
+
+读取某个故事下的会话列表。
+
+### `POST /api/stories/:story_id/sessions`
+
+创建或恢复某个故事下的会话。
+
+```json
+{
+  "user_id": "local_user",
+  "title": "新的会话"
+}
+```
+
+### `PUT /api/sessions/:session_id`
+
+更新会话标题或状态。
+
+```json
+{
+  "title": "古堡大厅",
+  "status": "active"
+}
+```
+
+### `DELETE /api/sessions/:session_id`
+
+软删除会话，实际会将 `sessions.status` 更新为 `deleted`。
+
 ### `POST /api/story/continue`
 
 创建小说续写任务。配置 `DATABASE_URL` 后，server 会保存用户输入、AI 回复和 AI 任务状态。
