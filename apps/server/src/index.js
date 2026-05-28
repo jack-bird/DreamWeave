@@ -399,6 +399,7 @@ async function persistTaskError(pending, payload, status = "error") {
   }
 
   const durationMs = Math.max(Date.now() - pending.startedAt, 0);
+  const errorMessage = formatTaskErrorMessage(payload);
   await withDbTransaction(async (client) => {
     await client.query(
       `
@@ -416,7 +417,7 @@ async function persistTaskError(pending, payload, status = "error") {
         pending.task.task_id,
         status,
         payload.error_code || "UNKNOWN_ERROR",
-        payload.message || null,
+        errorMessage,
         payload.retryable ?? null,
         durationMs,
       ],
@@ -424,6 +425,19 @@ async function persistTaskError(pending, payload, status = "error") {
 
     await client.query("UPDATE sessions SET updated_at = now() WHERE id = $1", [pending.task.session_id]);
   });
+}
+
+function formatTaskErrorMessage(payload) {
+  const baseMessage = cleanText(payload.message, "");
+  const detail = payload.detail && typeof payload.detail === "object" ? payload.detail : {};
+  const qualityIssues = Array.isArray(detail.quality_issues) ? detail.quality_issues : [];
+
+  if (qualityIssues.length) {
+    const issueText = qualityIssues.map((issue) => String(issue)).join("; ");
+    return baseMessage ? `${baseMessage} | quality_issues=${issueText}` : `quality_issues=${issueText}`;
+  }
+
+  return baseMessage || null;
 }
 
 async function handleSessionMessages(req, res, sessionId) {
@@ -1083,6 +1097,8 @@ function errorCodeToHttpStatus(errorCode) {
     case "OLLAMA_TIMEOUT":
     case "TASK_TIMEOUT":
       return 504;
+    case "GENERATION_QUALITY_FAILED":
+      return 422;
     default:
       return 500;
   }

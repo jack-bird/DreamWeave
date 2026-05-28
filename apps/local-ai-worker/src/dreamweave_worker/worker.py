@@ -124,6 +124,12 @@ class LocalAIWorker:
                         agent_trace=result.get('agent_trace')
                     )
                 else:
+                    detail = {
+                        "quality_issues": result.get("quality_issues") or [],
+                        "agent_trace": result.get("agent_trace") or {},
+                    }
+                    if result.get("content"):
+                        detail["content_preview"] = str(result.get("content"))[:160]
                     return AIResult(
                         task_id=task.task_id,
                         status='error',
@@ -131,7 +137,8 @@ class LocalAIWorker:
                         error_code=result.get('error_code', 'AGENT_ERROR'),
                         message=result.get('error_message', 'Agent workflow failed'),
                         state_update=result.get('state_update'),
-                        agent_trace=result.get('agent_trace')
+                        agent_trace=result.get('agent_trace'),
+                        detail=detail,
                     )
 
             except httpx.TimeoutException:
@@ -460,7 +467,8 @@ class LocalAIWorker:
                     message=result.message or "Unknown error",
                     worker_id=self.config.worker_id,
                     request_id=request_id,
-                    retryable=result.error_code in RETRYABLE_ERROR_CODES
+                    retryable=result.error_code in RETRYABLE_ERROR_CODES,
+                    detail=getattr(result, "detail", None) or _build_error_detail(result),
                 )
             )
 
@@ -496,3 +504,12 @@ class LocalAIWorker:
 
     async def _send_json(self, websocket: Any, message: dict[str, Any]) -> None:
         await websocket.send(json.dumps(message, ensure_ascii=False))
+
+
+def _build_error_detail(result: AIResult) -> dict[str, Any] | None:
+    detail: dict[str, Any] = {}
+    if result.agent_trace:
+        detail["agent_trace"] = result.agent_trace
+    if result.state_update:
+        detail["state_update"] = result.state_update
+    return detail or None

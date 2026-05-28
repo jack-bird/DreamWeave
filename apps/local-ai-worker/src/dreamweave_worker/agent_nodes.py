@@ -408,13 +408,17 @@ def execute_agent_workflow(task: Dict[str, Any], ollama_client=None, worlds_path
             break
     
     # Prepare result payload
+    error_message = agent_state.error_message
+    if not error_message and agent_state.quality_issues:
+        error_message = "Quality check failed: " + "; ".join(agent_state.quality_issues)
+
     result = {
         'task_id': agent_state.task_id,
         'status': 'success' if agent_state.quality_passed else 'error',
         'content': agent_state.final_response,
         'state_update': agent_state.state_update,
         'agent_trace': agent_state.agent_trace,
-        'error_message': agent_state.error_message,
+        'error_message': error_message,
         'model': agent_state.model
     }
     
