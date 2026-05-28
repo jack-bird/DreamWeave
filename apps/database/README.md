@@ -7,7 +7,8 @@
 ```text
 apps/database/
 ├── migrations/
-│   └── 001_init.sql
+│   ├── 001_init.sql
+│   └── 002_add_story_states.sql
 └── seeds/
     └── 001_local_dev.sql
 ```
@@ -27,6 +28,7 @@ psql -d dreamweave -f .\apps\database\seeds\001_local_dev.sql
 ```powershell
 $env:DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:5432/dreamweave"
 psql $env:DATABASE_URL -f .\apps\database\migrations\001_init.sql
+psql $env:DATABASE_URL -f .\apps\database\migrations\002_add_story_states.sql
 psql $env:DATABASE_URL -f .\apps\database\seeds\001_local_dev.sql
 ```
 
@@ -52,6 +54,9 @@ session_local
 - `apps/server` 在 `POST /api/story/continue` 请求中自动 upsert `users`、`stories`、`sessions`。
 - 用户输入和 AI 回复会写入 `messages`。
 - AI 任务状态、输出和错误信息会写入 `ai_tasks`。
+- Worker 返回的 `state_update` 会合并写入 `story_states`。
 - `GET /api/sessions/:session_id/messages` 可以读取会话历史消息。
+- `GET /api/story/state/:session_id` 可以读取 StoryState。
+- `PUT /api/story/state/:session_id` 可以手动更新 StoryState。
 
-下一步是在服务器拉取最新代码，执行 `npm install --omit=dev` 安装 `pg` 依赖，重启 PM2，并在线上用一次真实生成验证 `messages` 和 `ai_tasks` 写入结果。
+下一步是在服务器拉取最新代码，执行 `002_add_story_states.sql`，重启 PM2，并在线上用一次真实生成验证 `messages`、`ai_tasks` 和 `story_states` 写入结果。
