@@ -966,6 +966,125 @@ async function handleCreateStory(req, res) {
   }
 }
 
+async function handleUpdateStory(req, res, storyId) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_REQUEST_BODY",
+      message: error.message,
+    });
+    return;
+  }
+
+  const userId = cleanText(body.user_id, "local_user");
+  const title = cleanText(body.title, null);
+  const worldSetting = cleanText(body.world_setting, null);
+  const characterSetting = cleanText(body.character_setting, null);
+  const defaultModel = cleanText(body.default_model || body.model, null);
+  const hasGenerationOptions = isPlainObject(body.generation_options);
+
+  if (!title && !worldSetting && !characterSetting && !defaultModel && !hasGenerationOptions) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_REQUEST",
+      message: "title, settings, model, or generation_options is required",
+    });
+    return;
+  }
+
+  try {
+    const result = await database.pool.query(
+      `
+      UPDATE stories
+      SET
+        title = COALESCE($3, title),
+        world_setting = COALESCE($4, world_setting),
+        character_setting = COALESCE($5, character_setting),
+        default_model = COALESCE($6, default_model),
+        generation_options = COALESCE($7::jsonb, generation_options)
+      WHERE id = $1 AND user_id = $2
+      RETURNING *
+      `,
+      [
+        storyId,
+        userId,
+        title,
+        worldSetting,
+        characterSetting,
+        defaultModel,
+        hasGenerationOptions ? jsonParam(body.generation_options) : null,
+      ],
+    );
+
+    if (!result.rows.length) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "STORY_NOT_FOUND",
+        message: `Story not found: ${storyId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      status: "success",
+      story: result.rows[0],
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleDeleteStory(req, res, storyId) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
+  const userId = cleanText(url.searchParams.get("user_id"), "local_user");
+
+  try {
+    const result = await database.pool.query(
+      `
+      DELETE FROM stories
+      WHERE id = $1 AND user_id = $2
+      RETURNING *
+      `,
+      [storyId, userId],
+    );
+
+    if (!result.rows.length) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "STORY_NOT_FOUND",
+        message: `Story not found: ${storyId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      status: "success",
+      story: result.rows[0],
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
 async function handleListStorySessions(req, res, storyId) {
   if (!database.pool) {
     sendJson(res, 200, {
@@ -1178,6 +1297,88 @@ async function handleDeleteSession(req, res, sessionId) {
     sendJson(res, 200, {
       status: "success",
       session: result.rows[0],
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleClearSession(req, res, sessionId) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  try {
+    const result = await withDbTransaction(async (client) => {
+      const sessionResult = await client.query(
+        `
+        SELECT *
+        FROM sessions
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [sessionId],
+      );
+
+      if (!sessionResult.rows.length) {
+        return null;
+      }
+
+      const messagesResult = await client.query(
+        `
+        DELETE FROM messages
+        WHERE session_id = $1
+        `,
+        [sessionId],
+      );
+      const stateResult = await client.query(
+        `
+        DELETE FROM story_states
+        WHERE session_id = $1
+        `,
+        [sessionId],
+      );
+      const taskResult = await client.query(
+        `
+        DELETE FROM ai_tasks
+        WHERE session_id = $1
+        `,
+        [sessionId],
+      );
+      const updatedSession = await client.query(
+        `
+        UPDATE sessions
+        SET updated_at = now()
+        WHERE id = $1
+        RETURNING *
+        `,
+        [sessionId],
+      );
+
+      return {
+        session: updatedSession.rows[0],
+        deleted_messages: messagesResult.rowCount,
+        deleted_story_states: stateResult.rowCount,
+        deleted_tasks: taskResult.rowCount,
+      };
+    });
+
+    if (!result) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "SESSION_NOT_FOUND",
+        message: `Session not found: ${sessionId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      status: "success",
+      ...result,
     });
   } catch (error) {
     sendJson(res, 500, {
@@ -1507,6 +1708,19 @@ function handleRequest(req, res) {
     }
   }
 
+  const storyMatch = url.pathname.match(/^\/api\/stories\/([^/]+)$/);
+  if (storyMatch) {
+    const storyId = decodeURIComponent(storyMatch[1]);
+    if (req.method === "PUT") {
+      handleUpdateStory(req, res, storyId);
+      return;
+    }
+    if (req.method === "DELETE") {
+      handleDeleteStory(req, res, storyId);
+      return;
+    }
+  }
+
   const storySessionsMatch = url.pathname.match(/^\/api\/stories\/([^/]+)\/sessions$/);
   if (storySessionsMatch) {
     const storyId = decodeURIComponent(storySessionsMatch[1]);
@@ -1533,9 +1747,22 @@ function handleRequest(req, res) {
     }
   }
 
+  const sessionClearMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/clear$/);
+  if (sessionClearMatch) {
+    const sessionId = decodeURIComponent(sessionClearMatch[1]);
+    if (req.method === "POST") {
+      handleClearSession(req, res, sessionId);
+      return;
+    }
+  }
+
   const sessionMessagesMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
   if (req.method === "GET" && sessionMessagesMatch) {
     handleSessionMessages(req, res, decodeURIComponent(sessionMessagesMatch[1]));
+    return;
+  }
+  if (req.method === "DELETE" && sessionMessagesMatch) {
+    handleClearSession(req, res, decodeURIComponent(sessionMessagesMatch[1]));
     return;
   }
 

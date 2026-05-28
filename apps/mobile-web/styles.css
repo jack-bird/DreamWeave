@@ -188,6 +188,7 @@ h1 {
 }
 
 .library-item.active,
+.story-row.active .library-item,
 .session-row.active .library-item {
   border-color: rgba(215, 168, 79, 0.72);
   background: rgba(215, 168, 79, 0.1);
@@ -210,11 +211,19 @@ h1 {
   font-size: 0.72rem;
 }
 
+.story-row,
 .session-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 42px 42px;
   gap: 6px;
   align-items: stretch;
+}
+
+.story-row {
+  grid-template-columns: minmax(0, 1fr) 42px 42px;
+}
+
+.session-row {
+  grid-template-columns: minmax(0, 1fr) 42px 42px 42px;
 }
 
 .mini-button {

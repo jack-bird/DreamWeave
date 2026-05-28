@@ -208,63 +208,6 @@ function renderMessages() {
   elements.messageList.scrollTop = elements.messageList.scrollHeight;
 }
 
-function renderStories() {
-  elements.storyList.replaceChildren();
-
-  if (!state.stories.length) {
-    elements.storyList.append(makeEmptyListNode("暂无故事"));
-    return;
-  }
-
-  for (const story of state.stories) {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = story.id === state.storyId ? "library-item active" : "library-item";
-    item.dataset.storyId = story.id;
-    item.innerHTML = `<strong></strong><span></span>`;
-    item.querySelector("strong").textContent = story.title || "未命名故事";
-    item.querySelector("span").textContent = `${story.session_count || 0} 个会话`;
-    elements.storyList.append(item);
-  }
-}
-
-function renderSessions() {
-  elements.sessionList.replaceChildren();
-
-  if (!state.sessions.length) {
-    elements.sessionList.append(makeEmptyListNode("暂无会话"));
-    return;
-  }
-
-  for (const session of state.sessions) {
-    const row = document.createElement("div");
-    row.className = session.id === state.sessionId ? "session-row active" : "session-row";
-
-    const select = document.createElement("button");
-    select.type = "button";
-    select.className = "library-item";
-    select.dataset.sessionId = session.id;
-    select.innerHTML = `<strong></strong><span></span>`;
-    select.querySelector("strong").textContent = session.title || "未命名会话";
-    select.querySelector("span").textContent = `${session.message_count || 0} 条消息`;
-
-    const rename = document.createElement("button");
-    rename.type = "button";
-    rename.className = "mini-button";
-    rename.dataset.renameSessionId = session.id;
-    rename.textContent = "改名";
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "mini-button danger";
-    remove.dataset.deleteSessionId = session.id;
-    remove.textContent = "删除";
-
-    row.append(select, rename, remove);
-    elements.sessionList.append(row);
-  }
-}
-
 function makeEmptyListNode(text) {
   const node = document.createElement("div");
   node.className = "library-empty";
@@ -583,6 +526,209 @@ async function deleteSession(sessionId) {
   }
 }
 
+function renderStories() {
+  elements.storyList.replaceChildren();
+
+  if (!state.stories.length) {
+    elements.storyList.append(makeEmptyListNode("暂无故事"));
+    return;
+  }
+
+  for (const story of state.stories) {
+    const row = document.createElement("div");
+    row.className = story.id === state.storyId ? "story-row active" : "story-row";
+
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "library-item";
+    select.dataset.storyId = story.id;
+    select.innerHTML = `<strong></strong><span></span>`;
+    select.querySelector("strong").textContent = story.title || "未命名故事";
+    select.querySelector("span").textContent = `${story.session_count || 0} 个会话`;
+
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.className = "mini-button";
+    rename.dataset.renameStoryId = story.id;
+    rename.textContent = "改名";
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "mini-button danger";
+    remove.dataset.deleteStoryId = story.id;
+    remove.textContent = "删除";
+
+    row.append(select, rename, remove);
+    elements.storyList.append(row);
+  }
+}
+
+function renderSessions() {
+  elements.sessionList.replaceChildren();
+
+  if (!state.sessions.length) {
+    elements.sessionList.append(makeEmptyListNode("暂无会话"));
+    return;
+  }
+
+  for (const session of state.sessions) {
+    const row = document.createElement("div");
+    row.className = session.id === state.sessionId ? "session-row active" : "session-row";
+
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "library-item";
+    select.dataset.sessionId = session.id;
+    select.innerHTML = `<strong></strong><span></span>`;
+    select.querySelector("strong").textContent = session.title || "未命名会话";
+    select.querySelector("span").textContent = `${session.message_count || 0} 条消息`;
+
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.className = "mini-button";
+    rename.dataset.renameSessionId = session.id;
+    rename.textContent = "改名";
+
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "mini-button";
+    clear.dataset.clearSessionId = session.id;
+    clear.textContent = "清空";
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "mini-button danger";
+    remove.dataset.deleteSessionId = session.id;
+    remove.textContent = "删除";
+
+    row.append(select, rename, clear, remove);
+    elements.sessionList.append(row);
+  }
+}
+
+async function renameStory(storyId) {
+  const story = state.stories.find((item) => item.id === storyId);
+  const title = window.prompt("故事名称", story?.title || "新的故事");
+  if (!title) {
+    return;
+  }
+
+  const response = await fetch(`${API_BASE}/api/stories/${encodeURIComponent(storyId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: state.userId,
+      title,
+    }),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.message || "故事重命名失败");
+  }
+
+  if (state.storyId === storyId) {
+    elements.storyTitle.value = result.story.title;
+    elements.storyTitleDisplay.textContent = result.story.title;
+  }
+  await loadStories();
+  saveState();
+}
+
+async function deleteStory(storyId) {
+  const story = state.stories.find((item) => item.id === storyId);
+  const title = story?.title || "这个故事";
+  if (!window.confirm(`删除「${title}」？该故事下的会话、消息和状态会一并删除。`)) {
+    return;
+  }
+
+  const response = await fetch(
+    `${API_BASE}/api/stories/${encodeURIComponent(storyId)}?user_id=${encodeURIComponent(state.userId)}`,
+    { method: "DELETE" },
+  );
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.message || "删除故事失败");
+  }
+
+  await loadStories();
+  if (state.storyId !== storyId) {
+    renderStories();
+    saveState();
+    return;
+  }
+
+  const nextStory = state.stories[0];
+  if (nextStory) {
+    await selectStory(nextStory.id);
+  } else {
+    state.storyId = DEFAULT_STORY_ID;
+    state.sessionId = DEFAULT_SESSION_ID;
+    state.sessions = [];
+    state.messages = [];
+    renderStories();
+    renderSessions();
+    renderMessages();
+    renderStoryState(null, 0);
+    saveState();
+  }
+}
+
+async function clearSession(sessionId) {
+  if (!window.confirm("清空这个会话的消息和故事状态？")) {
+    return;
+  }
+
+  const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+    method: "DELETE",
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.message || "清空会话失败");
+  }
+
+  await loadSessions();
+  if (state.sessionId === sessionId) {
+    state.messages = [];
+    renderMessages();
+    renderStoryState(null, 0);
+    saveState();
+  }
+}
+
+function bindStoryManagementEvents() {
+  elements.storyList.addEventListener("click", (event) => {
+    const renameButton = event.target.closest("[data-rename-story-id]");
+    const deleteButton = event.target.closest("[data-delete-story-id]");
+
+    if (renameButton) {
+      renameStory(renameButton.dataset.renameStoryId).catch((error) => {
+        window.alert(error.message);
+      });
+      event.stopImmediatePropagation();
+      return;
+    }
+
+    if (deleteButton) {
+      deleteStory(deleteButton.dataset.deleteStoryId).catch((error) => {
+        window.alert(error.message);
+      });
+      event.stopImmediatePropagation();
+    }
+  });
+
+  elements.sessionList.addEventListener("click", (event) => {
+    const clearButton = event.target.closest("[data-clear-session-id]");
+    if (!clearButton) {
+      return;
+    }
+
+    clearSession(clearButton.dataset.clearSessionId).catch((error) => {
+      window.alert(error.message);
+    });
+    event.stopImmediatePropagation();
+  });
+}
+
 function bindEvents() {
   elements.libraryToggle.addEventListener("click", () => {
     elements.libraryPanel.hidden = !elements.libraryPanel.hidden;
@@ -682,6 +828,7 @@ function init() {
   elements.modelSelect.value = state.model;
   elements.storyTitleDisplay.textContent = elements.storyTitle.value.trim() || "黑夜古堡";
   bindEvents();
+  bindStoryManagementEvents();
   renderMessages();
   updateSendState();
   refreshHealth();
