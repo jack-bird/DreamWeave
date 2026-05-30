@@ -15,6 +15,7 @@ from .postprocess import clean_story_output
 from .prompt import render_story_prompt
 from .protocol import make_error_message, make_message, make_request_id, make_result_message, make_task_error_message
 from .schemas import AIResult, AITask
+from .rag_service import get_rag_service
 
 
 logger = logging.getLogger(__name__)
@@ -339,6 +340,10 @@ class LocalAIWorker:
             await self._cancel_ws_task(websocket, payload, request_id)
             return
 
+        if message_type == "rag.task":
+            await self._handle_rag_task(websocket, payload, request_id)
+            return
+
         if message_type in {"worker.registered", "worker.rejected"}:
             return
 
@@ -435,6 +440,60 @@ class LocalAIWorker:
                 request_id=request_id,
             ),
         )
+
+    async def _handle_rag_task(self, websocket: Any, payload: dict[str, Any], request_id: str | None) -> None:
+        """Handle RAG tasks like indexing or searching lore entries."""
+        try:
+            rag_service = get_rag_service()
+            task_type = payload.get("task_type", "index")
+            story_id = payload.get("story_id")
+            lore_entry = payload.get("lore_entry")
+            lore_entries = payload.get("lore_entries", [])
+            query = payload.get("query", "")
+            top_k = payload.get("top_k", 5)
+
+            result = {
+                "task_id": payload.get("task_id"),
+                "task_type": task_type,
+                "success": False,
+                "story_id": story_id
+            }
+
+            if task_type == "index" and lore_entry:
+                # Index a single lore entry
+                operation = lore_entry.get("operation", "add")
+                rag_result = rag_service.process_lore_entry(story_id, lore_entry, operation)
+                result.update(rag_result)
+
+            elif task_type == "reindex" and lore_entries:
+                # Reindex all lore entries for a story
+                rag_result = rag_service.batch_reindex(story_id, lore_entries)
+                result.update(rag_result)
+
+            elif task_type == "search" and query:
+                # Search for similar lore entries
+                rag_result = rag_service.search_lore(story_id, query, top_k)
+                result.update(rag_result)
+
+            else:
+                result["error"] = f"Invalid RAG task or missing required parameters for task type: {task_type}"
+
+            # Send result back to server
+            await self._send_json(
+                websocket,
+                make_message("rag.result", result, request_id)
+            )
+
+        except Exception as exc:
+            logger.error(f"Failed to handle RAG task: {exc}")
+            await self._send_json(
+                websocket,
+                make_error_message(
+                    "RAG_TASK_ERROR",
+                    f"RAG 任务处理失败: {str(exc)}",
+                    request_id=request_id,
+                ),
+            )
 
     async def _send_task_result(
         self,
