@@ -906,6 +906,28 @@ function parseTags(value) {
   return [];
 }
 
+function parseKeywords(value) {
+  return parseTags(value);
+}
+
+function parsePriority(value) {
+  const priority = Number(value);
+  if (!Number.isFinite(priority)) {
+    return 50;
+  }
+  return Math.max(0, Math.min(100, Math.round(priority)));
+}
+
+function parseEnabled(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return !["false", "0", "off", "no"].includes(value.toLowerCase());
+  }
+  return true;
+}
+
 function optionalString(body, key) {
   if (!Object.prototype.hasOwnProperty.call(body, key)) {
     return undefined;
@@ -1606,6 +1628,339 @@ async function handleSetCreatorWorkStatus(req, res, workId, status) {
     sendJson(res, 200, {
       status: "success",
       work: publicWork({ ...result.rows[0], session_count: 0 }),
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+function publicLoreEntry(row) {
+  return {
+    id: row.id,
+    story_id: row.story_id,
+    category: row.category,
+    title: row.title,
+    keywords: Array.isArray(row.keywords) ? row.keywords : [],
+    content: row.content,
+    priority: Number(row.priority || 50),
+    enabled: Boolean(row.enabled),
+    metadata: row.metadata || {},
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+async function ensureCreatorOwnsWork(client, workId, authorId) {
+  const result = await client.query(
+    `
+    SELECT id
+    FROM stories
+    WHERE id = $1 AND COALESCE(author_id, user_id) = $2
+    `,
+    [workId, authorId],
+  );
+  return result.rows.length > 0;
+}
+
+async function handleListCreatorLore(req, res, workId) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
+  const authorId = cleanText(url.searchParams.get("author_id") || url.searchParams.get("user_id"), "local_user");
+  const category = cleanText(url.searchParams.get("category"), "");
+  const q = cleanText(url.searchParams.get("q"), "");
+
+  try {
+    const result = await withDbTransaction(async (client) => {
+      if (!(await ensureCreatorOwnsWork(client, workId, authorId))) {
+        return null;
+      }
+
+      const params = [workId];
+      const filters = ["story_id = $1"];
+
+      if (category) {
+        params.push(category);
+        filters.push(`category = $${params.length}`);
+      }
+
+      if (q) {
+        params.push(`%${q}%`);
+        filters.push(`(title ILIKE $${params.length} OR content ILIKE $${params.length})`);
+      }
+
+      return await client.query(
+        `
+        SELECT *
+        FROM lore_entries
+        WHERE ${filters.join(" AND ")}
+        ORDER BY enabled DESC, priority DESC, updated_at DESC, created_at DESC
+        LIMIT 300
+        `,
+        params,
+      );
+    });
+
+    if (!result) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "WORK_NOT_FOUND",
+        message: `Work not found: ${workId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      persistence_enabled: true,
+      work_id: workId,
+      lore_entries: result.rows.map(publicLoreEntry),
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_READ_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleCreateCreatorLore(req, res, workId) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_REQUEST_BODY",
+      message: error.message,
+    });
+    return;
+  }
+
+  const authorId = cleanText(body.author_id || body.user_id, "local_user");
+  const entryId = cleanText(body.id || body.lore_id, makeId("lore"));
+  const title = cleanText(body.title, "新的 Lore");
+  const content = cleanText(body.content, "");
+  const category = cleanText(body.category, "lore");
+
+  if (!content) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_LORE",
+      message: "content is required",
+    });
+    return;
+  }
+
+  try {
+    const entry = await withDbTransaction(async (client) => {
+      if (!(await ensureCreatorOwnsWork(client, workId, authorId))) {
+        return null;
+      }
+
+      const result = await client.query(
+        `
+        INSERT INTO lore_entries (
+          id,
+          story_id,
+          category,
+          title,
+          keywords,
+          content,
+          priority,
+          enabled,
+          metadata
+        )
+        VALUES ($1, $2, $3, $4, $5::text[], $6, $7, $8, $9::jsonb)
+        ON CONFLICT (id) DO UPDATE
+        SET
+          category = EXCLUDED.category,
+          title = EXCLUDED.title,
+          keywords = EXCLUDED.keywords,
+          content = EXCLUDED.content,
+          priority = EXCLUDED.priority,
+          enabled = EXCLUDED.enabled,
+          metadata = EXCLUDED.metadata
+        RETURNING *
+        `,
+        [
+          entryId,
+          workId,
+          category,
+          title,
+          parseKeywords(body.keywords),
+          content,
+          parsePriority(body.priority),
+          parseEnabled(body.enabled),
+          jsonParam(body.metadata),
+        ],
+      );
+      return result.rows[0];
+    });
+
+    if (!entry) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "WORK_NOT_FOUND",
+        message: `Work not found: ${workId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 201, {
+      status: "success",
+      lore_entry: publicLoreEntry(entry),
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleUpdateCreatorLore(req, res, workId, entryId) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_REQUEST_BODY",
+      message: error.message,
+    });
+    return;
+  }
+
+  const authorId = cleanText(body.author_id || body.user_id, "local_user");
+
+  try {
+    const entry = await withDbTransaction(async (client) => {
+      if (!(await ensureCreatorOwnsWork(client, workId, authorId))) {
+        return null;
+      }
+
+      const result = await client.query(
+        `
+        UPDATE lore_entries
+        SET
+          category = COALESCE($3, category),
+          title = COALESCE($4, title),
+          keywords = COALESCE($5::text[], keywords),
+          content = COALESCE($6, content),
+          priority = COALESCE($7, priority),
+          enabled = COALESCE($8, enabled),
+          metadata = COALESCE($9::jsonb, metadata)
+        WHERE id = $1 AND story_id = $2
+        RETURNING *
+        `,
+        [
+          entryId,
+          workId,
+          optionalString(body, "category"),
+          optionalString(body, "title"),
+          Object.prototype.hasOwnProperty.call(body, "keywords") ? parseKeywords(body.keywords) : null,
+          optionalString(body, "content"),
+          Object.prototype.hasOwnProperty.call(body, "priority") ? parsePriority(body.priority) : null,
+          Object.prototype.hasOwnProperty.call(body, "enabled") ? parseEnabled(body.enabled) : null,
+          isPlainObject(body.metadata) ? jsonParam(body.metadata) : null,
+        ],
+      );
+      return result.rows[0] || false;
+    });
+
+    if (entry === null) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "WORK_NOT_FOUND",
+        message: `Work not found: ${workId}`,
+      });
+      return;
+    }
+
+    if (!entry) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "LORE_NOT_FOUND",
+        message: `Lore entry not found: ${entryId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      status: "success",
+      lore_entry: publicLoreEntry(entry),
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleDeleteCreatorLore(req, res, workId, entryId) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
+  const authorId = cleanText(url.searchParams.get("author_id") || url.searchParams.get("user_id"), "local_user");
+
+  try {
+    const entry = await withDbTransaction(async (client) => {
+      if (!(await ensureCreatorOwnsWork(client, workId, authorId))) {
+        return null;
+      }
+
+      const result = await client.query(
+        `
+        DELETE FROM lore_entries
+        WHERE id = $1 AND story_id = $2
+        RETURNING *
+        `,
+        [entryId, workId],
+      );
+      return result.rows[0] || false;
+    });
+
+    if (entry === null) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "WORK_NOT_FOUND",
+        message: `Work not found: ${workId}`,
+      });
+      return;
+    }
+
+    if (!entry) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "LORE_NOT_FOUND",
+        message: `Lore entry not found: ${entryId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      status: "success",
+      lore_entry: publicLoreEntry(entry),
     });
   } catch (error) {
     sendJson(res, 500, {
@@ -2452,6 +2807,33 @@ function handleRequest(req, res) {
   if (creatorWorkUnpublishMatch && req.method === "POST") {
     handleSetCreatorWorkStatus(req, res, decodeURIComponent(creatorWorkUnpublishMatch[1]), "draft");
     return;
+  }
+
+  const creatorLoreCollectionMatch = url.pathname.match(/^\/api\/creator\/works\/([^/]+)\/lore$/);
+  if (creatorLoreCollectionMatch) {
+    const workId = decodeURIComponent(creatorLoreCollectionMatch[1]);
+    if (req.method === "GET") {
+      handleListCreatorLore(req, res, workId);
+      return;
+    }
+    if (req.method === "POST") {
+      handleCreateCreatorLore(req, res, workId);
+      return;
+    }
+  }
+
+  const creatorLoreEntryMatch = url.pathname.match(/^\/api\/creator\/works\/([^/]+)\/lore\/([^/]+)$/);
+  if (creatorLoreEntryMatch) {
+    const workId = decodeURIComponent(creatorLoreEntryMatch[1]);
+    const entryId = decodeURIComponent(creatorLoreEntryMatch[2]);
+    if (req.method === "PUT") {
+      handleUpdateCreatorLore(req, res, workId, entryId);
+      return;
+    }
+    if (req.method === "DELETE") {
+      handleDeleteCreatorLore(req, res, workId, entryId);
+      return;
+    }
   }
 
   const creatorWorkMatch = url.pathname.match(/^\/api\/creator\/works\/([^/]+)$/);

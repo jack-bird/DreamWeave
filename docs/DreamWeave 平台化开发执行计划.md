@@ -2,7 +2,7 @@
 
 更新日期：2026-05-30
 
-当前执行状态：P0-P2 第一版已完成本地实现和线上验证；P3 作者后台 MVP 已完成本地实现，待线上部署验证。
+当前执行状态：P0-P2 第一版已完成本地实现和线上验证；P3 作者后台 MVP 与 P4 Lore CRUD 已完成本地实现，待线上部署验证。
 
 ## 1. 目标
 
@@ -654,7 +654,37 @@ H5 work detail 视图
 - [ ] 本地手测作者创建草稿、发布后在大厅可见。
 - [ ] 线上部署后复核 `stories.status`、`opening_message` 和大厅可见性。
 
-## 16. 暂缓事项
+## 16. 第三轮任务清单：P4 Lore CRUD 和世界观编辑器
+
+### 16.1 数据库
+
+- [x] 新增 `004_lore_entries.sql`。
+- [x] 新增 `lore_entries` 表、索引和 `updated_at` trigger。
+
+### 16.2 Server
+
+- [x] 新增 `GET /api/creator/works/:story_id/lore`。
+- [x] 新增 `POST /api/creator/works/:story_id/lore`。
+- [x] 新增 `PUT /api/creator/works/:story_id/lore/:id`。
+- [x] 新增 `DELETE /api/creator/works/:story_id/lore/:id`。
+- [x] Lore CRUD 按作者作品所有权校验。
+
+### 16.3 H5
+
+- [x] 在作者后台接入 Lore 条目列表。
+- [x] 支持新增 Lore。
+- [x] 支持编辑标题、分类、关键词、优先级、启用状态和正文。
+- [x] 支持删除 Lore 并二次确认。
+
+### 16.4 验证
+
+- [x] `node --check apps/server/src/index.js`
+- [x] `node --check apps/mobile-web/app.js`
+- [x] `python test_agent_workflow.py`
+- [ ] 本地手测 Lore 新增、编辑、禁用、删除。
+- [ ] 线上部署后执行 `004_lore_entries.sql` 并复核 Lore CRUD。
+
+## 17. 暂缓事项
 
 第一轮不要做：
 

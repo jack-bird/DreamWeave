@@ -16,6 +16,8 @@ const state = {
   selectedWork: null,
   creatorWorks: [],
   selectedCreatorWork: null,
+  loreEntries: [],
+  selectedLoreEntry: null,
   messages: [],
   storyState: null,
   storyStateVersion: 0,
@@ -26,6 +28,7 @@ const state = {
   savingSettings: false,
   startingWork: false,
   savingCreatorWork: false,
+  savingLore: false,
 };
 
 const elements = {
@@ -75,6 +78,19 @@ const elements = {
   unpublishCreatorWorkButton: document.querySelector("#unpublishCreatorWorkButton"),
   deleteCreatorWorkButton: document.querySelector("#deleteCreatorWorkButton"),
   creatorSaveStatus: document.querySelector("#creatorSaveStatus"),
+  loreEditor: document.querySelector("#loreEditor"),
+  newLoreButton: document.querySelector("#newLoreButton"),
+  loreList: document.querySelector("#loreList"),
+  loreForm: document.querySelector("#loreForm"),
+  loreTitle: document.querySelector("#loreTitle"),
+  loreCategory: document.querySelector("#loreCategory"),
+  loreKeywords: document.querySelector("#loreKeywords"),
+  lorePriority: document.querySelector("#lorePriority"),
+  loreEnabled: document.querySelector("#loreEnabled"),
+  loreContent: document.querySelector("#loreContent"),
+  saveLoreButton: document.querySelector("#saveLoreButton"),
+  deleteLoreButton: document.querySelector("#deleteLoreButton"),
+  loreSaveStatus: document.querySelector("#loreSaveStatus"),
   messageList: document.querySelector("#messageList"),
   storyStatePanel: document.querySelector("#storyStatePanel"),
   stateScene: document.querySelector("#stateScene"),
@@ -587,7 +603,11 @@ function renderCreatorWorks(errorText = "") {
 function fillCreatorForm(work) {
   state.selectedCreatorWork = work;
   elements.creatorWorkForm.hidden = !work;
+  elements.loreEditor.hidden = !work;
   if (!work) {
+    state.loreEntries = [];
+    state.selectedLoreEntry = null;
+    renderLoreEntries();
     return;
   }
 
@@ -603,6 +623,7 @@ function fillCreatorForm(work) {
   elements.creatorOpeningMessage.value = work.opening_message || "";
   setCreatorSaveStatus("");
   renderCreatorWorks();
+  void loadLoreEntries(work.id);
 }
 
 function readCreatorForm() {
@@ -732,6 +753,185 @@ async function deleteCreatorWork() {
   await loadCreatorWorks();
   fillCreatorForm(state.creatorWorks[0] || null);
   await loadWorks();
+}
+
+async function loadLoreEntries(workId = state.selectedCreatorWork?.id) {
+  if (!workId) {
+    state.loreEntries = [];
+    state.selectedLoreEntry = null;
+    renderLoreEntries();
+    return;
+  }
+
+  try {
+    const response = await fetch(
+      `${API_BASE}/api/creator/works/${encodeURIComponent(workId)}/lore?author_id=${encodeURIComponent(state.userId)}`,
+      { cache: "no-store" },
+    );
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.message || `HTTP ${response.status}`);
+    }
+
+    state.loreEntries = Array.isArray(result.lore_entries) ? result.lore_entries : [];
+    if (state.selectedLoreEntry) {
+      state.selectedLoreEntry = state.loreEntries.find((item) => item.id === state.selectedLoreEntry.id) || null;
+    }
+    renderLoreEntries();
+  } catch (error) {
+    state.loreEntries = [];
+    state.selectedLoreEntry = null;
+    renderLoreEntries(error.message);
+  }
+}
+
+function renderLoreEntries(errorText = "") {
+  elements.loreList.replaceChildren();
+
+  if (errorText) {
+    elements.loreList.append(makeEmptyListNode(`Lore 加载失败：${errorText}`));
+    elements.loreForm.hidden = true;
+    return;
+  }
+
+  if (!state.loreEntries.length) {
+    elements.loreList.append(makeEmptyListNode("暂无 Lore"));
+    elements.loreForm.hidden = true;
+    return;
+  }
+
+  for (const entry of state.loreEntries) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = state.selectedLoreEntry?.id === entry.id ? "lore-row active" : "lore-row";
+    row.dataset.loreId = entry.id;
+    row.innerHTML = `<strong></strong><span></span>`;
+    row.querySelector("strong").textContent = entry.title || "未命名 Lore";
+    row.querySelector("span").textContent = `${entry.category || "lore"} · ${entry.enabled ? "启用" : "禁用"} · P${entry.priority || 50}`;
+    elements.loreList.append(row);
+  }
+}
+
+function fillLoreForm(entry) {
+  state.selectedLoreEntry = entry;
+  elements.loreForm.hidden = !entry;
+  if (!entry) {
+    return;
+  }
+
+  elements.loreTitle.value = entry.title || "";
+  elements.loreCategory.value = entry.category || "lore";
+  elements.loreKeywords.value = Array.isArray(entry.keywords) ? entry.keywords.join(", ") : "";
+  elements.lorePriority.value = String(entry.priority ?? 50);
+  elements.loreEnabled.checked = Boolean(entry.enabled);
+  elements.loreContent.value = entry.content || "";
+  setLoreSaveStatus("");
+  renderLoreEntries();
+}
+
+function readLoreForm() {
+  return {
+    author_id: state.userId,
+    title: elements.loreTitle.value.trim() || "未命名 Lore",
+    category: elements.loreCategory.value || "lore",
+    keywords: elements.loreKeywords.value,
+    priority: Number(elements.lorePriority.value || 50),
+    enabled: elements.loreEnabled.checked,
+    content: elements.loreContent.value.trim(),
+  };
+}
+
+function setLoreSaveStatus(text, isError = false) {
+  elements.loreSaveStatus.textContent = text;
+  elements.loreSaveStatus.classList.toggle("error", Boolean(isError));
+}
+
+async function createLoreEntry() {
+  if (!state.selectedCreatorWork) {
+    return;
+  }
+
+  const response = await fetch(`${API_BASE}/api/creator/works/${encodeURIComponent(state.selectedCreatorWork.id)}/lore`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      author_id: state.userId,
+      title: "新的 Lore",
+      category: "lore",
+      keywords: [],
+      content: "在这里写入世界观设定。",
+      priority: 50,
+      enabled: true,
+    }),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.message || "创建 Lore 失败");
+  }
+
+  state.selectedLoreEntry = result.lore_entry;
+  await loadLoreEntries();
+  fillLoreForm(result.lore_entry);
+}
+
+async function saveLoreEntry() {
+  if (!state.selectedCreatorWork || !state.selectedLoreEntry) {
+    return;
+  }
+
+  state.savingLore = true;
+  elements.saveLoreButton.disabled = true;
+  setLoreSaveStatus("保存中...");
+
+  try {
+    const response = await fetch(
+      `${API_BASE}/api/creator/works/${encodeURIComponent(state.selectedCreatorWork.id)}/lore/${encodeURIComponent(state.selectedLoreEntry.id)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(readLoreForm()),
+      },
+    );
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.message || "保存 Lore 失败");
+    }
+
+    state.selectedLoreEntry = result.lore_entry;
+    await loadLoreEntries();
+    fillLoreForm(result.lore_entry);
+    setLoreSaveStatus("已保存");
+  } catch (error) {
+    setLoreSaveStatus(error.message, true);
+    throw error;
+  } finally {
+    state.savingLore = false;
+    elements.saveLoreButton.disabled = false;
+  }
+}
+
+async function deleteLoreEntry() {
+  if (!state.selectedCreatorWork || !state.selectedLoreEntry) {
+    return;
+  }
+
+  const title = state.selectedLoreEntry.title || "这个 Lore";
+  if (!window.confirm(`删除「${title}」？`)) {
+    return;
+  }
+
+  const response = await fetch(
+    `${API_BASE}/api/creator/works/${encodeURIComponent(state.selectedCreatorWork.id)}/lore/${encodeURIComponent(state.selectedLoreEntry.id)}?author_id=${encodeURIComponent(state.userId)}`,
+    { method: "DELETE" },
+  );
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.message || "删除 Lore 失败");
+  }
+
+  state.selectedLoreEntry = null;
+  await loadLoreEntries();
+  fillLoreForm(state.loreEntries[0] || null);
 }
 
 function renderStoryState(storyState, version) {
@@ -1376,6 +1576,35 @@ function bindEvents() {
     });
   });
 
+  elements.newLoreButton.addEventListener("click", () => {
+    createLoreEntry().catch((error) => {
+      window.alert(error.message);
+    });
+  });
+
+  elements.loreList.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-lore-id]");
+    if (!row) {
+      return;
+    }
+
+    const entry = state.loreEntries.find((item) => item.id === row.dataset.loreId);
+    fillLoreForm(entry || null);
+  });
+
+  elements.loreForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveLoreEntry().catch((error) => {
+      window.alert(error.message);
+    });
+  });
+
+  elements.deleteLoreButton.addEventListener("click", () => {
+    deleteLoreEntry().catch((error) => {
+      window.alert(error.message);
+    });
+  });
+
   elements.libraryToggle.addEventListener("click", () => {
     elements.libraryPanel.hidden = !elements.libraryPanel.hidden;
     if (!elements.libraryPanel.hidden) {
@@ -1491,6 +1720,7 @@ function init() {
   renderMessages();
   renderWorks();
   renderCreatorWorks();
+  renderLoreEntries();
   updateSendState();
   updateSettingsSaveState();
   refreshHealth();

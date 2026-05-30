@@ -160,6 +160,58 @@
               <span id="creatorSaveStatus" aria-live="polite"></span>
             </div>
           </form>
+          <section class="lore-editor" id="loreEditor" hidden>
+            <div class="panel-heading">
+              <span>Lore 条目</span>
+              <button id="newLoreButton" type="button">新增</button>
+            </div>
+            <div class="lore-layout">
+              <div class="lore-list" id="loreList"></div>
+              <form class="lore-form" id="loreForm" hidden>
+                <div class="form-row">
+                  <label>
+                    <span>标题</span>
+                    <input id="loreTitle" />
+                  </label>
+                  <label>
+                    <span>分类</span>
+                    <select id="loreCategory">
+                      <option value="lore">背景</option>
+                      <option value="character">角色</option>
+                      <option value="location">地点</option>
+                      <option value="faction">势力</option>
+                      <option value="rule">规则</option>
+                      <option value="style">文风</option>
+                      <option value="event">事件</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="form-row">
+                  <label>
+                    <span>关键词</span>
+                    <input id="loreKeywords" placeholder="玄阴谷, 禁地, 魔气" />
+                  </label>
+                  <label>
+                    <span>优先级</span>
+                    <input id="lorePriority" type="number" min="0" max="100" value="50" />
+                  </label>
+                </div>
+                <label class="checkbox-label">
+                  <input id="loreEnabled" type="checkbox" checked />
+                  <span>启用</span>
+                </label>
+                <label>
+                  <span>正文</span>
+                  <textarea id="loreContent" rows="5"></textarea>
+                </label>
+                <div class="creator-actions">
+                  <button class="primary-button" id="saveLoreButton" type="submit">保存 Lore</button>
+                  <button class="secondary-button danger-button" id="deleteLoreButton" type="button">删除 Lore</button>
+                  <span id="loreSaveStatus" aria-live="polite"></span>
+                </div>
+              </form>
+            </div>
+          </section>
         </div>
       </section>
 
