@@ -887,6 +887,39 @@ function publicWork(row) {
   };
 }
 
+function parseTags(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item).trim())
+      .filter(Boolean)
+      .slice(0, 12);
+  }
+
+  if (typeof value === "string") {
+    return value
+      .split(/[，,]/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, 12);
+  }
+
+  return [];
+}
+
+function optionalString(body, key) {
+  if (!Object.prototype.hasOwnProperty.call(body, key)) {
+    return undefined;
+  }
+  return typeof body[key] === "string" ? body[key].trim() : "";
+}
+
+function ensureValidStoryStatus(status) {
+  if (!["draft", "published", "archived"].includes(status)) {
+    throw new Error("status must be draft, published, or archived");
+  }
+  return status;
+}
+
 async function handleListStories(req, res) {
   if (!database.pool) {
     sendJson(res, 200, {
@@ -1163,6 +1196,421 @@ async function handleStartWork(req, res, workId) {
     sendJson(res, error.message.startsWith("Work not found") ? 404 : 500, {
       status: "error",
       error_code: error.message.startsWith("Work not found") ? "WORK_NOT_FOUND" : "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleListCreatorWorks(req, res) {
+  if (!database.pool) {
+    sendJson(res, 200, {
+      persistence_enabled: false,
+      works: [],
+    });
+    return;
+  }
+
+  const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
+  const authorId = cleanText(url.searchParams.get("author_id") || url.searchParams.get("user_id"), "local_user");
+
+  try {
+    const result = await database.pool.query(
+      `
+      SELECT
+        s.id,
+        s.user_id,
+        s.author_id,
+        u.nickname AS author_name,
+        s.title,
+        s.description,
+        s.cover_image,
+        s.tags,
+        s.status,
+        s.world_setting,
+        s.character_setting,
+        s.opening_message,
+        s.default_model,
+        s.generation_options,
+        s.created_at,
+        s.updated_at,
+        COUNT(sess.id)::integer AS session_count
+      FROM stories s
+      LEFT JOIN users u ON u.id = COALESCE(s.author_id, s.user_id)
+      LEFT JOIN sessions sess ON sess.story_id = s.id AND sess.status <> 'deleted'
+      WHERE COALESCE(s.author_id, s.user_id) = $1
+      GROUP BY s.id, u.nickname
+      ORDER BY s.updated_at DESC, s.created_at DESC
+      LIMIT 100
+      `,
+      [authorId],
+    );
+
+    sendJson(res, 200, {
+      persistence_enabled: true,
+      works: result.rows.map(publicWork),
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_READ_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleCreateCreatorWork(req, res) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_REQUEST_BODY",
+      message: error.message,
+    });
+    return;
+  }
+
+  const authorId = cleanText(body.author_id || body.user_id, "local_user");
+  const workId = cleanText(body.work_id || body.story_id || body.id, makeId("story"));
+  const title = cleanText(body.title, "新的作品");
+  let status;
+  try {
+    status = ensureValidStoryStatus(cleanText(body.status, "draft"));
+  } catch (error) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_STATUS",
+      message: error.message,
+    });
+    return;
+  }
+  const tags = parseTags(body.tags);
+  const generationOptions = isPlainObject(body.generation_options) ? body.generation_options : {};
+
+  try {
+    const work = await withDbTransaction(async (client) => {
+      await ensureUser(client, authorId);
+      const result = await client.query(
+        `
+        INSERT INTO stories (
+          id,
+          user_id,
+          author_id,
+          title,
+          description,
+          cover_image,
+          tags,
+          status,
+          world_setting,
+          character_setting,
+          opening_message,
+          default_model,
+          generation_options
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7::text[], $8, $9, $10, $11, $12, $13::jsonb)
+        ON CONFLICT (id) DO UPDATE
+        SET
+          author_id = EXCLUDED.author_id,
+          title = EXCLUDED.title,
+          description = EXCLUDED.description,
+          cover_image = EXCLUDED.cover_image,
+          tags = EXCLUDED.tags,
+          status = EXCLUDED.status,
+          world_setting = EXCLUDED.world_setting,
+          character_setting = EXCLUDED.character_setting,
+          opening_message = EXCLUDED.opening_message,
+          default_model = EXCLUDED.default_model,
+          generation_options = EXCLUDED.generation_options
+        RETURNING *
+        `,
+        [
+          workId,
+          authorId,
+          authorId,
+          title,
+          cleanText(body.description, ""),
+          cleanText(body.cover_image, ""),
+          tags,
+          status,
+          cleanText(body.world_setting, ""),
+          cleanText(body.character_setting, ""),
+          cleanText(body.opening_message, ""),
+          cleanText(body.default_model || body.model, null),
+          jsonParam(generationOptions),
+        ],
+      );
+      return result.rows[0];
+    });
+
+    sendJson(res, 201, {
+      status: "success",
+      work: publicWork({ ...work, session_count: 0 }),
+    });
+  } catch (error) {
+    sendJson(res, error.message.startsWith("status must") ? 400 : 500, {
+      status: "error",
+      error_code: error.message.startsWith("status must") ? "INVALID_STATUS" : "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleGetCreatorWork(req, res, workId) {
+  if (!database.pool) {
+    sendJson(res, 404, {
+      status: "error",
+      error_code: "WORK_NOT_FOUND",
+      message: `Work not found: ${workId}`,
+    });
+    return;
+  }
+
+  const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
+  const authorId = cleanText(url.searchParams.get("author_id") || url.searchParams.get("user_id"), "local_user");
+
+  try {
+    const result = await database.pool.query(
+      `
+      SELECT
+        s.id,
+        s.user_id,
+        s.author_id,
+        u.nickname AS author_name,
+        s.title,
+        s.description,
+        s.cover_image,
+        s.tags,
+        s.status,
+        s.world_setting,
+        s.character_setting,
+        s.opening_message,
+        s.default_model,
+        s.generation_options,
+        s.created_at,
+        s.updated_at,
+        COUNT(sess.id)::integer AS session_count
+      FROM stories s
+      LEFT JOIN users u ON u.id = COALESCE(s.author_id, s.user_id)
+      LEFT JOIN sessions sess ON sess.story_id = s.id AND sess.status <> 'deleted'
+      WHERE s.id = $1 AND COALESCE(s.author_id, s.user_id) = $2
+      GROUP BY s.id, u.nickname
+      `,
+      [workId, authorId],
+    );
+
+    if (!result.rows.length) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "WORK_NOT_FOUND",
+        message: `Work not found: ${workId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      persistence_enabled: true,
+      work: publicWork(result.rows[0]),
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_READ_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleUpdateCreatorWork(req, res, workId) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_REQUEST_BODY",
+      message: error.message,
+    });
+    return;
+  }
+
+  const authorId = cleanText(body.author_id || body.user_id, "local_user");
+  const title = optionalString(body, "title");
+  const description = optionalString(body, "description");
+  const coverImage = optionalString(body, "cover_image");
+  const worldSetting = optionalString(body, "world_setting");
+  const characterSetting = optionalString(body, "character_setting");
+  const openingMessage = optionalString(body, "opening_message");
+  const defaultModel = Object.prototype.hasOwnProperty.call(body, "default_model")
+    ? cleanText(body.default_model || body.model, null)
+    : undefined;
+  const tags = Object.prototype.hasOwnProperty.call(body, "tags") ? parseTags(body.tags) : undefined;
+  let status;
+  try {
+    status = Object.prototype.hasOwnProperty.call(body, "status")
+      ? ensureValidStoryStatus(cleanText(body.status, "draft"))
+      : undefined;
+  } catch (error) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_STATUS",
+      message: error.message,
+    });
+    return;
+  }
+  const hasGenerationOptions = isPlainObject(body.generation_options);
+
+  try {
+    const result = await database.pool.query(
+      `
+      UPDATE stories
+      SET
+        title = COALESCE($3, title),
+        description = COALESCE($4, description),
+        cover_image = COALESCE($5, cover_image),
+        tags = COALESCE($6::text[], tags),
+        status = COALESCE($7, status),
+        world_setting = COALESCE($8, world_setting),
+        character_setting = COALESCE($9, character_setting),
+        opening_message = COALESCE($10, opening_message),
+        default_model = COALESCE($11, default_model),
+        generation_options = COALESCE($12::jsonb, generation_options)
+      WHERE id = $1 AND COALESCE(author_id, user_id) = $2
+      RETURNING *
+      `,
+      [
+        workId,
+        authorId,
+        title,
+        description,
+        coverImage,
+        tags,
+        status,
+        worldSetting,
+        characterSetting,
+        openingMessage,
+        defaultModel,
+        hasGenerationOptions ? jsonParam(body.generation_options) : null,
+      ],
+    );
+
+    if (!result.rows.length) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "WORK_NOT_FOUND",
+        message: `Work not found: ${workId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      status: "success",
+      work: publicWork({ ...result.rows[0], session_count: 0 }),
+    });
+  } catch (error) {
+    sendJson(res, error.message.startsWith("status must") ? 400 : 500, {
+      status: "error",
+      error_code: error.message.startsWith("status must") ? "INVALID_STATUS" : "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleDeleteCreatorWork(req, res, workId) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
+  const authorId = cleanText(url.searchParams.get("author_id") || url.searchParams.get("user_id"), "local_user");
+
+  try {
+    const result = await database.pool.query(
+      `
+      DELETE FROM stories
+      WHERE id = $1 AND COALESCE(author_id, user_id) = $2
+      RETURNING *
+      `,
+      [workId, authorId],
+    );
+
+    if (!result.rows.length) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "WORK_NOT_FOUND",
+        message: `Work not found: ${workId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      status: "success",
+      work: publicWork({ ...result.rows[0], session_count: 0 }),
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_WRITE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleSetCreatorWorkStatus(req, res, workId, status) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  let body = {};
+  try {
+    body = await readRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_REQUEST_BODY",
+      message: error.message,
+    });
+    return;
+  }
+
+  const authorId = cleanText(body.author_id || body.user_id, "local_user");
+
+  try {
+    const result = await database.pool.query(
+      `
+      UPDATE stories
+      SET status = $3
+      WHERE id = $1 AND COALESCE(author_id, user_id) = $2
+      RETURNING *
+      `,
+      [workId, authorId, status],
+    );
+
+    if (!result.rows.length) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "WORK_NOT_FOUND",
+        message: `Work not found: ${workId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      status: "success",
+      work: publicWork({ ...result.rows[0], session_count: 0 }),
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_WRITE_FAILED",
       message: error.message,
     });
   }
@@ -1981,6 +2429,46 @@ function handleRequest(req, res) {
   if (workMatch && req.method === "GET") {
     handleGetWork(req, res, decodeURIComponent(workMatch[1]));
     return;
+  }
+
+  if (url.pathname === "/api/creator/works") {
+    if (req.method === "GET") {
+      handleListCreatorWorks(req, res);
+      return;
+    }
+    if (req.method === "POST") {
+      handleCreateCreatorWork(req, res);
+      return;
+    }
+  }
+
+  const creatorWorkPublishMatch = url.pathname.match(/^\/api\/creator\/works\/([^/]+)\/publish$/);
+  if (creatorWorkPublishMatch && req.method === "POST") {
+    handleSetCreatorWorkStatus(req, res, decodeURIComponent(creatorWorkPublishMatch[1]), "published");
+    return;
+  }
+
+  const creatorWorkUnpublishMatch = url.pathname.match(/^\/api\/creator\/works\/([^/]+)\/unpublish$/);
+  if (creatorWorkUnpublishMatch && req.method === "POST") {
+    handleSetCreatorWorkStatus(req, res, decodeURIComponent(creatorWorkUnpublishMatch[1]), "draft");
+    return;
+  }
+
+  const creatorWorkMatch = url.pathname.match(/^\/api\/creator\/works\/([^/]+)$/);
+  if (creatorWorkMatch) {
+    const workId = decodeURIComponent(creatorWorkMatch[1]);
+    if (req.method === "GET") {
+      handleGetCreatorWork(req, res, workId);
+      return;
+    }
+    if (req.method === "PUT") {
+      handleUpdateCreatorWork(req, res, workId);
+      return;
+    }
+    if (req.method === "DELETE") {
+      handleDeleteCreatorWork(req, res, workId);
+      return;
+    }
   }
 
   if (url.pathname === "/api/stories") {

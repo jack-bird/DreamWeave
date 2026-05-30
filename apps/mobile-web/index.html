@@ -23,6 +23,9 @@
           <button class="icon-button" id="playButton" type="button" title="当前游玩">
             <span aria-hidden="true">▶</span>
           </button>
+          <button class="icon-button" id="creatorButton" type="button" title="作者后台">
+            <span aria-hidden="true">✎</span>
+          </button>
           <button class="icon-button" id="libraryToggle" type="button" title="故事与会话">
             <span aria-hidden="true">☰</span>
           </button>
@@ -88,6 +91,76 @@
       <section class="work-detail-view app-view" id="workDetailView" hidden>
         <button class="text-button" id="backToDiscoverButton" type="button">返回大厅</button>
         <article class="work-detail" id="workDetail"></article>
+      </section>
+
+      <section class="creator-view app-view" id="creatorView" hidden>
+        <div class="view-heading">
+          <div>
+            <span>作者后台</span>
+            <h2>作品管理</h2>
+          </div>
+          <button class="secondary-button" id="newCreatorWorkButton" type="button">新建草稿</button>
+        </div>
+        <div class="creator-layout">
+          <div class="creator-list" id="creatorWorkList"></div>
+          <form class="creator-editor" id="creatorWorkForm" hidden>
+            <div class="form-row">
+              <label>
+                <span>标题</span>
+                <input id="creatorTitle" />
+              </label>
+              <label>
+                <span>状态</span>
+                <select id="creatorStatus">
+                  <option value="draft">草稿</option>
+                  <option value="published">已发布</option>
+                  <option value="archived">已归档</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              <span>简介</span>
+              <textarea id="creatorDescription" rows="3"></textarea>
+            </label>
+            <label>
+              <span>标签</span>
+              <input id="creatorTags" placeholder="悬疑, 古风, 低魔" />
+            </label>
+            <label>
+              <span>封面地址</span>
+              <input id="creatorCoverImage" placeholder="https://..." />
+            </label>
+            <div class="form-row">
+              <label>
+                <span>默认模型</span>
+                <input id="creatorDefaultModel" />
+              </label>
+              <label>
+                <span>作品 ID</span>
+                <input id="creatorWorkId" disabled />
+              </label>
+            </div>
+            <label>
+              <span>世界观</span>
+              <textarea id="creatorWorldSetting" rows="4"></textarea>
+            </label>
+            <label>
+              <span>角色</span>
+              <textarea id="creatorCharacterSetting" rows="4"></textarea>
+            </label>
+            <label>
+              <span>开场白</span>
+              <textarea id="creatorOpeningMessage" rows="4"></textarea>
+            </label>
+            <div class="creator-actions">
+              <button class="primary-button" id="saveCreatorWorkButton" type="submit">保存</button>
+              <button class="secondary-button" id="publishCreatorWorkButton" type="button">发布</button>
+              <button class="secondary-button" id="unpublishCreatorWorkButton" type="button">下架</button>
+              <button class="secondary-button danger-button" id="deleteCreatorWorkButton" type="button">删除</button>
+              <span id="creatorSaveStatus" aria-live="polite"></span>
+            </div>
+          </form>
+        </div>
       </section>
 
       <section class="story-stage app-view" id="playView" aria-live="polite">

@@ -14,6 +14,8 @@ const state = {
   sessions: [],
   works: [],
   selectedWork: null,
+  creatorWorks: [],
+  selectedCreatorWork: null,
   messages: [],
   storyState: null,
   storyStateVersion: 0,
@@ -23,6 +25,7 @@ const state = {
   sending: false,
   savingSettings: false,
   startingWork: false,
+  savingCreatorWork: false,
 };
 
 const elements = {
@@ -30,6 +33,7 @@ const elements = {
   workerStatus: document.querySelector("#workerStatus"),
   discoverButton: document.querySelector("#discoverButton"),
   playButton: document.querySelector("#playButton"),
+  creatorButton: document.querySelector("#creatorButton"),
   libraryToggle: document.querySelector("#libraryToggle"),
   libraryPanel: document.querySelector("#libraryPanel"),
   storyList: document.querySelector("#storyList"),
@@ -47,11 +51,30 @@ const elements = {
   settingsSaveStatus: document.querySelector("#settingsSaveStatus"),
   discoverView: document.querySelector("#discoverView"),
   workDetailView: document.querySelector("#workDetailView"),
+  creatorView: document.querySelector("#creatorView"),
   playView: document.querySelector("#playView"),
   refreshWorksButton: document.querySelector("#refreshWorksButton"),
   workGrid: document.querySelector("#workGrid"),
   workDetail: document.querySelector("#workDetail"),
   backToDiscoverButton: document.querySelector("#backToDiscoverButton"),
+  newCreatorWorkButton: document.querySelector("#newCreatorWorkButton"),
+  creatorWorkList: document.querySelector("#creatorWorkList"),
+  creatorWorkForm: document.querySelector("#creatorWorkForm"),
+  creatorTitle: document.querySelector("#creatorTitle"),
+  creatorStatus: document.querySelector("#creatorStatus"),
+  creatorDescription: document.querySelector("#creatorDescription"),
+  creatorTags: document.querySelector("#creatorTags"),
+  creatorCoverImage: document.querySelector("#creatorCoverImage"),
+  creatorDefaultModel: document.querySelector("#creatorDefaultModel"),
+  creatorWorkId: document.querySelector("#creatorWorkId"),
+  creatorWorldSetting: document.querySelector("#creatorWorldSetting"),
+  creatorCharacterSetting: document.querySelector("#creatorCharacterSetting"),
+  creatorOpeningMessage: document.querySelector("#creatorOpeningMessage"),
+  saveCreatorWorkButton: document.querySelector("#saveCreatorWorkButton"),
+  publishCreatorWorkButton: document.querySelector("#publishCreatorWorkButton"),
+  unpublishCreatorWorkButton: document.querySelector("#unpublishCreatorWorkButton"),
+  deleteCreatorWorkButton: document.querySelector("#deleteCreatorWorkButton"),
+  creatorSaveStatus: document.querySelector("#creatorSaveStatus"),
   messageList: document.querySelector("#messageList"),
   storyStatePanel: document.querySelector("#storyStatePanel"),
   stateScene: document.querySelector("#stateScene"),
@@ -197,6 +220,7 @@ function setView(view) {
   state.currentView = view;
   elements.discoverView.hidden = view !== "discover";
   elements.workDetailView.hidden = view !== "workDetail";
+  elements.creatorView.hidden = view !== "creator";
   elements.playView.hidden = view !== "play";
   elements.composer.hidden = view !== "play";
 
@@ -209,12 +233,18 @@ function setView(view) {
     void loadWorks();
   }
 
+  if (view === "creator") {
+    void loadCreatorWorks();
+  }
+
   saveState();
 }
 
 function setHashView(view, id = "") {
   if (view === "discover") {
     window.location.hash = "#/discover";
+  } else if (view === "creator") {
+    window.location.hash = "#/creator/works";
   } else if (view === "workDetail" && id) {
     window.location.hash = `#/works/${encodeURIComponent(id)}`;
   } else {
@@ -228,6 +258,11 @@ function applyRoute() {
 
   if (hash === "#/discover") {
     setView("discover");
+    return;
+  }
+
+  if (hash === "#/creator/works") {
+    setView("creator");
     return;
   }
 
@@ -498,6 +533,205 @@ async function startWork(workId) {
       renderWorkDetail(state.selectedWork);
     }
   }
+}
+
+async function loadCreatorWorks() {
+  try {
+    const response = await fetch(
+      `${API_BASE}/api/creator/works?author_id=${encodeURIComponent(state.userId)}`,
+      { cache: "no-store" },
+    );
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.message || `HTTP ${response.status}`);
+    }
+
+    state.creatorWorks = Array.isArray(result.works) ? result.works : [];
+    if (!state.selectedCreatorWork && state.creatorWorks.length) {
+      state.selectedCreatorWork = state.creatorWorks[0];
+      fillCreatorForm(state.selectedCreatorWork);
+    }
+    renderCreatorWorks();
+  } catch (error) {
+    state.creatorWorks = [];
+    renderCreatorWorks(error.message);
+  }
+}
+
+function renderCreatorWorks(errorText = "") {
+  elements.creatorWorkList.replaceChildren();
+
+  if (errorText) {
+    elements.creatorWorkList.append(makeEmptyListNode(`作者作品加载失败：${errorText}`));
+    return;
+  }
+
+  if (!state.creatorWorks.length) {
+    elements.creatorWorkList.append(makeEmptyListNode("暂无作品草稿"));
+    elements.creatorWorkForm.hidden = true;
+    return;
+  }
+
+  for (const work of state.creatorWorks) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = state.selectedCreatorWork?.id === work.id ? "creator-work-row active" : "creator-work-row";
+    row.dataset.creatorWorkId = work.id;
+    row.innerHTML = `<strong></strong><span></span>`;
+    row.querySelector("strong").textContent = work.title || "未命名作品";
+    row.querySelector("span").textContent = `${work.status || "draft"} · ${work.session_count || 0} 个存档`;
+    elements.creatorWorkList.append(row);
+  }
+}
+
+function fillCreatorForm(work) {
+  state.selectedCreatorWork = work;
+  elements.creatorWorkForm.hidden = !work;
+  if (!work) {
+    return;
+  }
+
+  elements.creatorWorkId.value = work.id || "";
+  elements.creatorTitle.value = work.title || "";
+  elements.creatorStatus.value = work.status || "draft";
+  elements.creatorDescription.value = work.description || "";
+  elements.creatorTags.value = Array.isArray(work.tags) ? work.tags.join(", ") : "";
+  elements.creatorCoverImage.value = work.cover_image || "";
+  elements.creatorDefaultModel.value = work.default_model || state.model || "";
+  elements.creatorWorldSetting.value = work.world_setting || "";
+  elements.creatorCharacterSetting.value = work.character_setting || "";
+  elements.creatorOpeningMessage.value = work.opening_message || "";
+  setCreatorSaveStatus("");
+  renderCreatorWorks();
+}
+
+function readCreatorForm() {
+  return {
+    author_id: state.userId,
+    title: elements.creatorTitle.value.trim() || "未命名作品",
+    status: elements.creatorStatus.value,
+    description: elements.creatorDescription.value.trim(),
+    tags: elements.creatorTags.value,
+    cover_image: elements.creatorCoverImage.value.trim(),
+    default_model: elements.creatorDefaultModel.value.trim() || state.model,
+    world_setting: elements.creatorWorldSetting.value.trim(),
+    character_setting: elements.creatorCharacterSetting.value.trim(),
+    opening_message: elements.creatorOpeningMessage.value.trim(),
+  };
+}
+
+function setCreatorSaveStatus(text, isError = false) {
+  elements.creatorSaveStatus.textContent = text;
+  elements.creatorSaveStatus.classList.toggle("error", Boolean(isError));
+}
+
+async function createCreatorWork() {
+  const response = await fetch(`${API_BASE}/api/creator/works`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      author_id: state.userId,
+      title: "新的作品",
+      status: "draft",
+      default_model: state.model,
+      world_setting: "",
+      character_setting: "",
+      opening_message: "",
+    }),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.message || "创建作品失败");
+  }
+
+  state.selectedCreatorWork = result.work;
+  await loadCreatorWorks();
+  fillCreatorForm(result.work);
+}
+
+async function saveCreatorWork() {
+  if (!state.selectedCreatorWork) {
+    return;
+  }
+
+  state.savingCreatorWork = true;
+  elements.saveCreatorWorkButton.disabled = true;
+  setCreatorSaveStatus("保存中...");
+
+  try {
+    const response = await fetch(`${API_BASE}/api/creator/works/${encodeURIComponent(state.selectedCreatorWork.id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(readCreatorForm()),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.message || "保存作品失败");
+    }
+
+    state.selectedCreatorWork = result.work;
+    await loadCreatorWorks();
+    fillCreatorForm(result.work);
+    setCreatorSaveStatus("已保存");
+    await loadWorks();
+  } catch (error) {
+    setCreatorSaveStatus(error.message, true);
+    throw error;
+  } finally {
+    state.savingCreatorWork = false;
+    elements.saveCreatorWorkButton.disabled = false;
+  }
+}
+
+async function setCreatorWorkPublished(published) {
+  if (!state.selectedCreatorWork) {
+    return;
+  }
+
+  const action = published ? "publish" : "unpublish";
+  const response = await fetch(
+    `${API_BASE}/api/creator/works/${encodeURIComponent(state.selectedCreatorWork.id)}/${action}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ author_id: state.userId }),
+    },
+  );
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.message || (published ? "发布失败" : "下架失败"));
+  }
+
+  state.selectedCreatorWork = result.work;
+  await loadCreatorWorks();
+  fillCreatorForm(result.work);
+  await loadWorks();
+  setCreatorSaveStatus(published ? "已发布" : "已下架");
+}
+
+async function deleteCreatorWork() {
+  if (!state.selectedCreatorWork) {
+    return;
+  }
+
+  const title = state.selectedCreatorWork.title || "这个作品";
+  if (!window.confirm(`删除「${title}」？该作品下的存档、消息和状态会一并删除。`)) {
+    return;
+  }
+
+  const response = await fetch(
+    `${API_BASE}/api/creator/works/${encodeURIComponent(state.selectedCreatorWork.id)}?author_id=${encodeURIComponent(state.userId)}`,
+    { method: "DELETE" },
+  );
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.message || "删除作品失败");
+  }
+
+  state.selectedCreatorWork = null;
+  await loadCreatorWorks();
+  fillCreatorForm(state.creatorWorks[0] || null);
+  await loadWorks();
 }
 
 function renderStoryState(storyState, version) {
@@ -1069,6 +1303,10 @@ function bindEvents() {
     setHashView("play");
   });
 
+  elements.creatorButton.addEventListener("click", () => {
+    setHashView("creator");
+  });
+
   elements.refreshWorksButton.addEventListener("click", () => {
     loadWorks().catch((error) => {
       window.alert(error.message);
@@ -1093,6 +1331,47 @@ function bindEvents() {
       return;
     }
     startWork(button.dataset.startWorkId).catch((error) => {
+      window.alert(error.message);
+    });
+  });
+
+  elements.newCreatorWorkButton.addEventListener("click", () => {
+    createCreatorWork().catch((error) => {
+      window.alert(error.message);
+    });
+  });
+
+  elements.creatorWorkList.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-creator-work-id]");
+    if (!row) {
+      return;
+    }
+
+    const work = state.creatorWorks.find((item) => item.id === row.dataset.creatorWorkId);
+    fillCreatorForm(work || null);
+  });
+
+  elements.creatorWorkForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveCreatorWork().catch((error) => {
+      window.alert(error.message);
+    });
+  });
+
+  elements.publishCreatorWorkButton.addEventListener("click", () => {
+    setCreatorWorkPublished(true).catch((error) => {
+      window.alert(error.message);
+    });
+  });
+
+  elements.unpublishCreatorWorkButton.addEventListener("click", () => {
+    setCreatorWorkPublished(false).catch((error) => {
+      window.alert(error.message);
+    });
+  });
+
+  elements.deleteCreatorWorkButton.addEventListener("click", () => {
+    deleteCreatorWork().catch((error) => {
       window.alert(error.message);
     });
   });
@@ -1211,6 +1490,7 @@ function init() {
   bindStoryManagementEvents();
   renderMessages();
   renderWorks();
+  renderCreatorWorks();
   updateSendState();
   updateSettingsSaveState();
   refreshHealth();
