@@ -12,6 +12,16 @@
 . E:\ai_home\AI_Projects\llm_env\Scripts\Activate.ps1
 ```
 
+安装 Worker 依赖。Chroma 向量库和 sentence-transformers 也安装在这个环境里，因为 RAG 索引和检索是在 Worker 内部执行的：
+
+```powershell
+cd E:\ai_home\AI_Projects\DreamWeave
+python -m pip install -r .\apps\local-ai-worker\requirements.txt
+python -c "import chromadb; import sentence_transformers; print('RAG dependencies OK')"
+```
+
+如果 Worker 运行在本地电脑，就不需要在云服务器上安装这些 Python 依赖；云服务器只负责 Node.js Server、PostgreSQL 和 WebSocket 转发。
+
 检查 Ollama：
 
 ```powershell
