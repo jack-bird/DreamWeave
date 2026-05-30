@@ -133,7 +133,7 @@ async function loadSessionMessages() {
     }
 
     const result = await response.json();
-    if (!result.persistence_enabled || !Array.isArray(result.messages) || !result.messages.length) {
+    if (!result.persistence_enabled || !Array.isArray(result.messages)) {
       return;
     }
 
@@ -176,6 +176,7 @@ async function loadStoryState() {
 
 async function loadLibrary() {
   await loadStories();
+  syncCurrentStorySelection();
   await loadSessions();
 }
 
@@ -209,10 +210,43 @@ async function loadSessions() {
 
     const result = await response.json();
     state.sessions = Array.isArray(result.sessions) ? result.sessions : [];
+    syncCurrentSessionSelection();
     renderSessions();
   } catch {
     state.sessions = [];
     renderSessions();
+  }
+}
+
+function syncCurrentStorySelection() {
+  if (!state.stories.length) {
+    return;
+  }
+
+  let story = state.stories.find((item) => item.id === state.storyId);
+  if (!story) {
+    story = state.stories[0];
+    state.storyId = story.id;
+  }
+
+  elements.storyTitle.value = story.title || elements.storyTitle.value || "未命名故事";
+  elements.storyTitleDisplay.textContent = elements.storyTitle.value;
+  elements.worldSetting.value = story.world_setting || elements.worldSetting.value;
+  elements.characterSetting.value = story.character_setting || elements.characterSetting.value;
+  if (story.default_model) {
+    state.model = story.default_model;
+    elements.modelSelect.value = state.model;
+  }
+}
+
+function syncCurrentSessionSelection() {
+  if (!state.sessions.length) {
+    return;
+  }
+
+  const currentSession = state.sessions.find((item) => item.id === state.sessionId);
+  if (!currentSession) {
+    state.sessionId = state.sessions[0].id;
   }
 }
 
@@ -1711,6 +1745,13 @@ function bindEvents() {
   window.addEventListener("hashchange", applyRoute);
 }
 
+async function initializeData() {
+  await loadLibrary();
+  await loadSessionMessages();
+  await loadStoryState();
+  saveState();
+}
+
 function init() {
   loadState();
   elements.modelSelect.value = state.model;
@@ -1724,10 +1765,15 @@ function init() {
   updateSendState();
   updateSettingsSaveState();
   refreshHealth();
-  loadLibrary();
-  loadSessionMessages();
-  loadStoryState();
   applyRoute();
+  initializeData().catch((error) => {
+    state.messages.push({
+      role: "error",
+      content: `加载历史失败：${error.message}`,
+      createdAt: new Date().toISOString(),
+    });
+    renderMessages();
+  });
   window.setInterval(refreshHealth, 10000);
 }
 
