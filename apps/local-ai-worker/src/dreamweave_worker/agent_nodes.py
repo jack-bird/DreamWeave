@@ -7,6 +7,8 @@ from datetime import datetime
 
 from .agent_state import AgentState
 from .lore import LoreSystem, SimpleLoreRetriever
+from .rag_service import get_rag_service
+from .postprocess import PLAYER_INNER_STATE_PATTERNS, clean_story_output
 
 
 class AgentNode:
@@ -53,6 +55,14 @@ class RetrieveLoreNode(AgentNode):
             
             # Set current world in lore system
             self.lore_system.current_world = world_name
+
+            rag_context = self._retrieve_rag_context(state)
+            if rag_context:
+                state.retrieved_lore = [rag_context]
+                state.agent_trace['lore_retrieved'] = True
+                state.agent_trace['lore_source'] = 'chroma'
+                state.agent_trace['world_name'] = world_name
+                return state
             
             # Retrieve relevant context
             lore_context = self.retriever.retrieve_context_for_generation(
@@ -64,6 +74,7 @@ class RetrieveLoreNode(AgentNode):
             
             state.retrieved_lore = [lore_context]
             state.agent_trace['lore_retrieved'] = True
+            state.agent_trace['lore_source'] = 'file'
             state.agent_trace['world_name'] = world_name
             
         except Exception as e:
@@ -72,6 +83,55 @@ class RetrieveLoreNode(AgentNode):
             state.retrieved_lore = ["World: Fantasy setting with magic and adventure"]
         
         return state
+
+    def _retrieve_rag_context(self, state: AgentState) -> str:
+        if not state.story_id:
+            state.agent_trace['rag_skipped'] = 'missing_story_id'
+            return ""
+
+        query_parts = [
+            state.user_input,
+            state.story_state.current_scene,
+            state.story_state.story_stage,
+            state.story_state.long_summary[-300:] if state.story_state.long_summary else "",
+        ]
+        query = " ".join(part for part in query_parts if part).strip()
+        if not query:
+            state.agent_trace['rag_skipped'] = 'empty_query'
+            return ""
+
+        try:
+            result = get_rag_service().search_lore(state.story_id, query, top_k=5)
+        except Exception as exc:  # noqa: BLE001
+            state.agent_trace['rag_error'] = str(exc)
+            return ""
+
+        if not result.get("success"):
+            state.agent_trace['rag_error'] = result.get("error", "unknown")
+            return ""
+
+        entries = result.get("results") or []
+        state.agent_trace['rag_query'] = query[:160]
+        state.agent_trace['rag_result_count'] = len(entries)
+        if not entries:
+            return ""
+
+        formatted_entries = []
+        for entry in entries[:5]:
+            title = entry.get("title") or entry.get("id") or "未命名 Lore"
+            category = entry.get("category") or "lore"
+            keywords = entry.get("keywords") or []
+            keyword_text = "，".join(str(keyword) for keyword in keywords if keyword)
+            content = (entry.get("content") or "").strip()
+            if len(content) > 500:
+                content = content[:500].rstrip() + "..."
+
+            header = f"- {title}（{category}）"
+            if keyword_text:
+                header += f" 关键词：{keyword_text}"
+            formatted_entries.append(f"{header}\n  {content}")
+
+        return "=== RAG RELEVANT LORE ===\n" + "\n".join(formatted_entries)
 
 
 class PlanNarrativeNode(AgentNode):
@@ -156,7 +216,7 @@ class GenerateStoryNode(AgentNode):
             )
             
             if response:
-                state.final_response = response.strip()
+                state.final_response = clean_story_output(response)
                 state.agent_trace['generation_success'] = True
                 state.agent_trace['tokens_generated'] = len(state.final_response)
             else:
@@ -212,11 +272,14 @@ class GenerateStoryNode(AgentNode):
 输出规则：
 1. 只输出中文小说正文，不要标题、列表、选项或系统说明。
 2. 使用第二人称“你”指代玩家。
-3. 不要描写玩家的想法、感受或替玩家决定下一步行动。
-4. 只描写玩家行动造成的直接后果、环境反馈和 NPC / 事件变化。
-5. 保持世界观一致，不引入现代物品或无关设定。
-6. 长度控制在 200 到 400 个中文字符。
-7. 结尾停在开放局面，让玩家自己决定下一步。
+3. 禁止用第一人称叙述，不要用“我”指代玩家。
+4. 不要描写玩家的想法、感受或替玩家决定下一步行动。
+5. 只描写玩家行动造成的直接后果、环境反馈和 NPC / 事件变化。
+6. 保持世界观一致，不引入现代物品或无关设定。
+7. 不要重复输出同一段或高度相似段落。
+8. 不要写“你心中”“你感觉”“你不知道”“你知道”“恐惧感”“兴趣”等玩家内心判断。
+9. 结尾停在开放局面，让玩家自己决定下一步。
+10. 长度控制在 180 到 320 个中文字符。
 
 请直接生成下一段正文："""
 
@@ -228,6 +291,8 @@ class QualityCheckAndUpdateStateNode(AgentNode):
     
     def __call__(self, state: AgentState) -> AgentState:
         """Perform quality checks and update state."""
+        if state.final_response:
+            state.final_response = clean_story_output(state.final_response)
         
         if not state.final_response:
             state.quality_passed = False
@@ -245,7 +310,11 @@ class QualityCheckAndUpdateStateNode(AgentNode):
             (r'你感到', "Describing player feelings"),
             (r'你认为', "Describing player thoughts"),
             (r'你想要', "Describing player desires"),
+            (r'(^|[。！？!?\n])我(?!说|问|答|喊|道|低声|轻声|冷笑|笑)', "Using first-person narration for player"),
         ]
+        forbidden_patterns.extend(
+            (pattern, "Describing player inner state") for pattern in PLAYER_INNER_STATE_PATTERNS
+        )
         
         for pattern, issue in forbidden_patterns:
             if re.search(pattern, state.final_response):
@@ -263,6 +332,12 @@ class QualityCheckAndUpdateStateNode(AgentNode):
         for term in modern_terms:
             if term in state.final_response:
                 issues.append(f"Modern term: {term}")
+
+        # Check repeated sentences after cleanup.
+        sentences = [item.strip() for item in re.findall(r"[^。！？!?]+[。！？!?]?", state.final_response) if item.strip()]
+        normalized_sentences = [re.sub(r"\s+", "", item) for item in sentences]
+        if len(normalized_sentences) != len(set(normalized_sentences)):
+            issues.append("Repeated sentence")
         
         # Update quality status. Soft issues are reported in trace, but only
         # critical generation failures should turn a usable story paragraph into
@@ -270,9 +345,10 @@ class QualityCheckAndUpdateStateNode(AgentNode):
         state.quality_issues = issues
         hard_issue_prefixes = (
             "Making decisions",
-            "Describing player feelings",
             "Describing player thoughts",
             "Describing player desires",
+            "Using first-person",
+            "Repeated sentence",
             "Response too short",
         )
         state.quality_passed = not any(issue.startswith(hard_issue_prefixes) for issue in issues)
@@ -391,7 +467,7 @@ class ReviseStoryNode(AgentNode):
 
             if response:
                 state.draft_response = state.final_response
-                state.final_response = response.strip()
+                state.final_response = clean_story_output(response)
                 state.revision_count += 1
                 state.quality_passed = True
                 state.quality_issues = []
@@ -423,9 +499,12 @@ class ReviseStoryNode(AgentNode):
 重写规则：
 1. 只输出中文小说正文。
 2. 不要写“你决定”“你感到”“你认为”“你想要”。
-3. 不要替玩家做下一步决定。
-4. 保留玩家行动带来的直接后果和外部环境变化。
-5. 长度控制在 200 到 400 个中文字符。
+3. 使用第二人称“你”指代玩家，禁止用“我”作为玩家叙述视角。
+4. 不要替玩家做下一步决定。
+5. 不要重复输出同一段或高度相似段落。
+6. 不要描写玩家内心、感觉、恐惧、兴趣或判断。
+7. 保留玩家行动带来的直接后果和外部环境变化。
+8. 长度控制在 180 到 320 个中文字符。
 
 请直接输出重写后的正文："""
 

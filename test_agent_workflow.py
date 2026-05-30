@@ -127,6 +127,59 @@ def test_agent_nodes():
         print(f"[FAIL] Agent nodes failed: {e}")
         return False
 
+def test_rag_lore_retrieval_node():
+    """Test that RetrieveLoreNode prefers RAG results when available."""
+    try:
+        from dreamweave_worker import agent_nodes
+        from dreamweave_worker.agent_nodes import RetrieveLoreNode
+        from dreamweave_worker.agent_state import AgentState, StoryState
+
+        class FakeRAGService:
+            def search_lore(self, story_id, query, top_k=5):
+                assert story_id == "story_test"
+                assert "黑塔" in query
+                return {
+                    "success": True,
+                    "results": [
+                        {
+                            "id": "lore_black_tower",
+                            "title": "黑塔",
+                            "category": "location",
+                            "priority": 80,
+                            "content": "黑塔位于北境荒原深处，是旧王朝留下的封印设施。",
+                            "keywords": ["黑塔", "北境", "封印"],
+                        }
+                    ],
+                }
+
+        original_get_rag_service = agent_nodes.get_rag_service
+        agent_nodes.get_rag_service = lambda: FakeRAGService()
+        try:
+            test_state = AgentState(
+                task_id="test_rag",
+                user_id="test_user",
+                story_id="story_test",
+                session_id="test_session",
+                model="fake-model",
+                user_input="我观察北境那座被封印的黑塔",
+                story_state=StoryState(current_scene="北境荒原", story_stage="opening"),
+            )
+
+            result_state = RetrieveLoreNode()(test_state)
+            joined_lore = "\n".join(result_state.retrieved_lore)
+            assert result_state.agent_trace["lore_source"] == "chroma"
+            assert result_state.agent_trace["rag_result_count"] == 1
+            assert "=== RAG RELEVANT LORE ===" in joined_lore
+            assert "黑塔位于北境荒原深处" in joined_lore
+        finally:
+            agent_nodes.get_rag_service = original_get_rag_service
+
+        print("[OK] RAG lore retrieval node works correctly")
+        return True
+    except Exception as e:
+        print(f"[FAIL] RAG lore retrieval node failed: {e}")
+        return False
+
 def test_revision_node():
     """Test that the revision node can rewrite a failed response."""
     try:
@@ -159,6 +212,88 @@ def test_revision_node():
         return True
     except Exception as e:
         print(f"[FAIL] Revision node failed: {e}")
+        return False
+
+def test_output_cleanup_and_first_person_quality():
+    """Test duplicate paragraph cleanup and first-person narration rejection."""
+    try:
+        from dreamweave_worker.agent_nodes import QualityCheckAndUpdateStateNode
+        from dreamweave_worker.agent_state import AgentState, StoryState
+        from dreamweave_worker.postprocess import clean_story_output
+
+        repeated = (
+            "风停了下来，月光照到塔基，隐藏的石门浮现。\n\n"
+            "风停了下来，月光照到塔基，隐藏的石门浮现。\n\n"
+            "风停了下来，月光照到塔基，隐藏的石门浮现。"
+        )
+        cleaned = clean_story_output(repeated)
+        assert cleaned.count("隐藏的石门浮现") == 1
+
+        inner_cleaned = clean_story_output(
+            "风停了下来，月光照到塔基，隐藏的石门浮现。"
+            "你心中燃起兴趣，也不知道它代表着什么。"
+            "塔基附近的旧王朝纹路开始发亮，石缝里渗出细薄的银白光线。"
+            "荒原上的碎石随低沉震动轻轻跳起，塔门内侧传来缓慢的锁链声。"
+        )
+        assert "心中" not in inner_cleaned
+        assert "不知道" not in inner_cleaned
+        assert "隐藏的石门浮现" in inner_cleaned
+        assert "旧王朝纹路开始发亮" in inner_cleaned
+
+        test_state = AgentState(
+            task_id="test_first_person",
+            user_id="test_user",
+            story_id="test_story",
+            session_id="test_session",
+            model="fake-model",
+            user_input="我查看黑塔入口",
+            story_state=StoryState(current_scene="北境荒原"),
+            final_response=(
+                "我站在荒原边缘，看见黑塔在月光下显露轮廓。"
+                "风停之后，塔基附近的石门浮现出细密的旧王朝纹路。"
+            ),
+        )
+
+        checked = QualityCheckAndUpdateStateNode()(test_state)
+        assert checked.quality_passed == False
+        assert any("first-person" in issue for issue in checked.quality_issues)
+
+        inner_state = AgentState(
+            task_id="test_inner_state",
+            user_id="test_user",
+            story_id="test_story",
+            session_id="test_session",
+            model="fake-model",
+            user_input="我查看黑塔入口",
+            story_state=StoryState(current_scene="北境荒原"),
+            final_response=inner_cleaned,
+        )
+        inner_checked = QualityCheckAndUpdateStateNode()(inner_state)
+        assert inner_checked.quality_passed == True
+
+        residual_feeling = AgentState(
+            task_id="test_residual_feeling",
+            user_id="test_user",
+            story_id="test_story",
+            session_id="test_session",
+            model="fake-model",
+            user_input="我查看黑塔入口",
+            story_state=StoryState(current_scene="北境荒原"),
+            final_response=(
+                "风停了下来，月光照到塔基，隐藏的石门浮现。"
+                "塔基附近的旧王朝纹路开始发亮，石缝里渗出细薄的银白光线。"
+                "荒原上的碎石随低沉震动轻轻跳起，塔门内侧传来缓慢的锁链声。"
+                "你感觉这座塔正在注视你。"
+            ),
+        )
+        residual_checked = QualityCheckAndUpdateStateNode()(residual_feeling)
+        assert residual_checked.quality_passed == True
+        assert "你感觉" not in residual_checked.final_response
+
+        print("[OK] Output cleanup and first-person quality checks work correctly")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Output cleanup and first-person quality checks failed: {e}")
         return False
 
 def test_protocol_extensions():
@@ -239,8 +374,14 @@ def main():
     print("\nTesting Agent Nodes...")
     results.append(test_agent_nodes())
 
+    print("\nTesting RAG Lore Retrieval Node...")
+    results.append(test_rag_lore_retrieval_node())
+    
     print("\nTesting Revision Node...")
     results.append(test_revision_node())
+
+    print("\nTesting Output Cleanup and First-Person Quality Checks...")
+    results.append(test_output_cleanup_and_first_person_quality())
     
     print("\nTesting Protocol Extensions...")
     results.append(test_protocol_extensions())
