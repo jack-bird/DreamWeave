@@ -12,18 +12,24 @@ const state = {
   sessionId: DEFAULT_SESSION_ID,
   stories: [],
   sessions: [],
+  works: [],
+  selectedWork: null,
   messages: [],
   storyState: null,
   storyStateVersion: 0,
   model: "qwen3:14b",
+  currentView: "play",
   workerReady: false,
   sending: false,
   savingSettings: false,
+  startingWork: false,
 };
 
 const elements = {
   connectionStatus: document.querySelector("#connectionStatus"),
   workerStatus: document.querySelector("#workerStatus"),
+  discoverButton: document.querySelector("#discoverButton"),
+  playButton: document.querySelector("#playButton"),
   libraryToggle: document.querySelector("#libraryToggle"),
   libraryPanel: document.querySelector("#libraryPanel"),
   storyList: document.querySelector("#storyList"),
@@ -39,6 +45,13 @@ const elements = {
   characterSetting: document.querySelector("#characterSetting"),
   saveStorySettingsButton: document.querySelector("#saveStorySettingsButton"),
   settingsSaveStatus: document.querySelector("#settingsSaveStatus"),
+  discoverView: document.querySelector("#discoverView"),
+  workDetailView: document.querySelector("#workDetailView"),
+  playView: document.querySelector("#playView"),
+  refreshWorksButton: document.querySelector("#refreshWorksButton"),
+  workGrid: document.querySelector("#workGrid"),
+  workDetail: document.querySelector("#workDetail"),
+  backToDiscoverButton: document.querySelector("#backToDiscoverButton"),
   messageList: document.querySelector("#messageList"),
   storyStatePanel: document.querySelector("#storyStatePanel"),
   stateScene: document.querySelector("#stateScene"),
@@ -61,6 +74,7 @@ function loadState() {
     state.messages = Array.isArray(saved.messages) ? saved.messages : [];
     state.storyId = saved.storyId || state.storyId;
     state.sessionId = saved.sessionId || state.sessionId;
+    state.currentView = saved.currentView || state.currentView;
     elements.storyTitle.value = saved.storyTitle || elements.storyTitle.value;
     elements.worldSetting.value = saved.worldSetting || elements.worldSetting.value;
     elements.characterSetting.value = saved.characterSetting || elements.characterSetting.value;
@@ -170,12 +184,78 @@ function saveState() {
       messages: state.messages.slice(-30),
       storyId: state.storyId,
       sessionId: state.sessionId,
+      currentView: state.currentView,
       model: state.model,
       storyTitle: elements.storyTitle.value,
       worldSetting: elements.worldSetting.value,
       characterSetting: elements.characterSetting.value,
     }),
   );
+}
+
+function setView(view) {
+  state.currentView = view;
+  elements.discoverView.hidden = view !== "discover";
+  elements.workDetailView.hidden = view !== "workDetail";
+  elements.playView.hidden = view !== "play";
+  elements.composer.hidden = view !== "play";
+
+  if (view !== "play") {
+    elements.libraryPanel.hidden = true;
+    elements.settingsPanel.hidden = true;
+  }
+
+  if (view === "discover") {
+    void loadWorks();
+  }
+
+  saveState();
+}
+
+function setHashView(view, id = "") {
+  if (view === "discover") {
+    window.location.hash = "#/discover";
+  } else if (view === "workDetail" && id) {
+    window.location.hash = `#/works/${encodeURIComponent(id)}`;
+  } else {
+    window.location.hash = "#/play";
+  }
+}
+
+function applyRoute() {
+  const hash = window.location.hash || "#/play";
+  const workMatch = hash.match(/^#\/works\/(.+)$/);
+
+  if (hash === "#/discover") {
+    setView("discover");
+    return;
+  }
+
+  if (workMatch) {
+    const workId = decodeURIComponent(workMatch[1]);
+    void openWorkDetail(workId);
+    return;
+  }
+
+  setView("play");
+}
+
+async function loadWorks() {
+  try {
+    const response = await fetch(`${API_BASE}/api/works`, {
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const result = await response.json();
+    state.works = Array.isArray(result.works) ? result.works : [];
+    renderWorks();
+  } catch (error) {
+    state.works = [];
+    renderWorks(error.message);
+  }
 }
 
 function setStatus(text, ready) {
@@ -225,6 +305,199 @@ function makeEmptyListNode(text) {
   node.className = "library-empty";
   node.textContent = text;
   return node;
+}
+
+function renderWorks(errorText = "") {
+  elements.workGrid.replaceChildren();
+
+  if (errorText) {
+    elements.workGrid.append(makeEmptyListNode(`作品加载失败：${errorText}`));
+    return;
+  }
+
+  if (!state.works.length) {
+    elements.workGrid.append(makeEmptyListNode("暂无已发布作品"));
+    return;
+  }
+
+  for (const work of state.works) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "work-card";
+    card.dataset.workId = work.id;
+
+    const cover = document.createElement("div");
+    cover.className = "work-cover";
+    if (work.cover_image) {
+      const image = document.createElement("img");
+      image.src = work.cover_image;
+      image.alt = "";
+      cover.append(image);
+    } else {
+      cover.textContent = getWorkInitials(work.title);
+    }
+
+    const body = document.createElement("div");
+    body.className = "work-card-body";
+
+    const title = document.createElement("h3");
+    title.textContent = work.title || "未命名作品";
+
+    const meta = document.createElement("p");
+    meta.textContent = `${work.author_name || "匿名作者"} · ${work.session_count || 0} 个存档`;
+
+    const description = document.createElement("p");
+    description.textContent = work.description || trimText(work.world_setting || "暂无简介", 90);
+
+    body.append(title, meta, makeTagList(work.tags), description);
+    card.append(cover, body);
+    elements.workGrid.append(card);
+  }
+}
+
+function getWorkInitials(title) {
+  const value = String(title || "DW").trim();
+  return value.slice(0, 2).toUpperCase();
+}
+
+function makeTagList(tags) {
+  const list = document.createElement("div");
+  list.className = "tag-list";
+
+  const values = Array.isArray(tags) ? tags.filter(Boolean).slice(0, 4) : [];
+  if (!values.length) {
+    const empty = document.createElement("span");
+    empty.textContent = "互动小说";
+    list.append(empty);
+    return list;
+  }
+
+  for (const tag of values) {
+    const node = document.createElement("span");
+    node.textContent = tag;
+    list.append(node);
+  }
+
+  return list;
+}
+
+async function openWorkDetail(workId) {
+  try {
+    const response = await fetch(`${API_BASE}/api/works/${encodeURIComponent(workId)}`, {
+      cache: "no-store",
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.message || `HTTP ${response.status}`);
+    }
+
+    state.selectedWork = result.work;
+    renderWorkDetail(result.work);
+    setView("workDetail");
+  } catch (error) {
+    state.selectedWork = null;
+    elements.workDetail.replaceChildren(makeEmptyListNode(`作品加载失败：${error.message}`));
+    setView("workDetail");
+  }
+}
+
+function renderWorkDetail(work) {
+  elements.workDetail.replaceChildren();
+
+  const hero = document.createElement("section");
+  hero.className = "work-detail-hero";
+  if (work.cover_image) {
+    hero.style.backgroundImage = `linear-gradient(180deg, rgba(20, 18, 15, 0.1), rgba(20, 18, 15, 0.92)), url("${work.cover_image}")`;
+    hero.style.backgroundSize = "cover";
+    hero.style.backgroundPosition = "center";
+  }
+
+  const title = document.createElement("h2");
+  title.textContent = work.title || "未命名作品";
+
+  const meta = document.createElement("p");
+  meta.textContent = `${work.author_name || "匿名作者"} · ${work.session_count || 0} 个存档`;
+
+  hero.append(makeTagList(work.tags), title, meta);
+
+  const intro = makeWorkSection("简介", work.description || work.world_setting || "暂无简介");
+  const world = makeWorkSection("世界观", work.world_setting || "暂无世界观设定");
+  const character = makeWorkSection("角色", work.character_setting || "暂无角色设定");
+  const opening = makeWorkSection("开场白", work.opening_message || "开始游玩后进入剧情。");
+
+  const actions = document.createElement("div");
+  actions.className = "work-actions";
+  const start = document.createElement("button");
+  start.type = "button";
+  start.className = "primary-button";
+  start.dataset.startWorkId = work.id;
+  start.disabled = state.startingWork;
+  start.textContent = state.startingWork ? "创建中..." : "开始游玩";
+  actions.append(start);
+
+  elements.workDetail.append(hero, intro, world, character, opening, actions);
+}
+
+function makeWorkSection(title, text) {
+  const section = document.createElement("section");
+  section.className = "work-detail-section";
+
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+
+  const paragraph = document.createElement("p");
+  paragraph.textContent = text;
+
+  section.append(heading, paragraph);
+  return section;
+}
+
+async function startWork(workId) {
+  state.startingWork = true;
+  if (state.selectedWork?.id === workId) {
+    renderWorkDetail(state.selectedWork);
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}/api/works/${encodeURIComponent(workId)}/play`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        player_id: state.userId,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.message || "开始游玩失败");
+    }
+
+    const work = result.work || state.selectedWork;
+    state.storyId = result.story_id || result.work_id || workId;
+    state.sessionId = result.session_id || result.session?.id;
+    state.messages = [];
+
+    if (work) {
+      elements.storyTitle.value = work.title || "未命名作品";
+      elements.storyTitleDisplay.textContent = elements.storyTitle.value;
+      elements.worldSetting.value = work.world_setting || "";
+      elements.characterSetting.value = work.character_setting || "";
+      if (work.default_model) {
+        state.model = work.default_model;
+        elements.modelSelect.value = state.model;
+      }
+    }
+
+    await loadLibrary();
+    await loadSessionMessages();
+    await loadStoryState();
+    saveState();
+    setHashView("play");
+  } finally {
+    state.startingWork = false;
+    if (state.selectedWork?.id === workId) {
+      renderWorkDetail(state.selectedWork);
+    }
+  }
 }
 
 function renderStoryState(storyState, version) {
@@ -788,6 +1061,42 @@ function bindStoryManagementEvents() {
 }
 
 function bindEvents() {
+  elements.discoverButton.addEventListener("click", () => {
+    setHashView("discover");
+  });
+
+  elements.playButton.addEventListener("click", () => {
+    setHashView("play");
+  });
+
+  elements.refreshWorksButton.addEventListener("click", () => {
+    loadWorks().catch((error) => {
+      window.alert(error.message);
+    });
+  });
+
+  elements.backToDiscoverButton.addEventListener("click", () => {
+    setHashView("discover");
+  });
+
+  elements.workGrid.addEventListener("click", (event) => {
+    const card = event.target.closest("[data-work-id]");
+    if (!card) {
+      return;
+    }
+    setHashView("workDetail", card.dataset.workId);
+  });
+
+  elements.workDetail.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-start-work-id]");
+    if (!button || state.startingWork) {
+      return;
+    }
+    startWork(button.dataset.startWorkId).catch((error) => {
+      window.alert(error.message);
+    });
+  });
+
   elements.libraryToggle.addEventListener("click", () => {
     elements.libraryPanel.hidden = !elements.libraryPanel.hidden;
     if (!elements.libraryPanel.hidden) {
@@ -890,6 +1199,8 @@ function bindEvents() {
     updateSendState();
     submitMessage(message);
   });
+
+  window.addEventListener("hashchange", applyRoute);
 }
 
 function init() {
@@ -899,12 +1210,14 @@ function init() {
   bindEvents();
   bindStoryManagementEvents();
   renderMessages();
+  renderWorks();
   updateSendState();
   updateSettingsSaveState();
   refreshHealth();
   loadLibrary();
   loadSessionMessages();
   loadStoryState();
+  applyRoute();
   window.setInterval(refreshHealth, 10000);
 }
 

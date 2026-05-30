@@ -850,6 +850,43 @@ function buildAITask(body) {
   };
 }
 
+function defaultStoryState() {
+  return {
+    current_world: "default_world",
+    current_scene: "",
+    story_stage: "opening",
+    long_summary: "",
+    characters: {},
+    relationships: {},
+    world_flags: {},
+    inventory: [],
+    pending_events: [],
+    user_preferences: {},
+    style_profile: {},
+  };
+}
+
+function publicWork(row) {
+  return {
+    id: row.id,
+    author_id: row.author_id || row.user_id,
+    author_name: row.author_name || null,
+    title: row.title,
+    description: row.description || "",
+    cover_image: row.cover_image || "",
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    status: row.status || "draft",
+    world_setting: row.world_setting || "",
+    character_setting: row.character_setting || "",
+    opening_message: row.opening_message || "",
+    default_model: row.default_model,
+    generation_options: row.generation_options || {},
+    session_count: Number(row.session_count || 0),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
 async function handleListStories(req, res) {
   if (!database.pool) {
     sendJson(res, 200, {
@@ -894,6 +931,238 @@ async function handleListStories(req, res) {
     sendJson(res, 500, {
       status: "error",
       error_code: "DB_READ_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleListWorks(req, res) {
+  if (!database.pool) {
+    sendJson(res, 200, {
+      persistence_enabled: false,
+      works: [],
+    });
+    return;
+  }
+
+  try {
+    const result = await database.pool.query(
+      `
+      SELECT
+        s.id,
+        s.user_id,
+        s.author_id,
+        u.nickname AS author_name,
+        s.title,
+        s.description,
+        s.cover_image,
+        s.tags,
+        s.status,
+        s.world_setting,
+        s.character_setting,
+        s.opening_message,
+        s.default_model,
+        s.generation_options,
+        s.created_at,
+        s.updated_at,
+        COUNT(sess.id)::integer AS session_count
+      FROM stories s
+      LEFT JOIN users u ON u.id = COALESCE(s.author_id, s.user_id)
+      LEFT JOIN sessions sess ON sess.story_id = s.id AND sess.status <> 'deleted'
+      WHERE s.status = 'published'
+      GROUP BY s.id, u.nickname
+      ORDER BY s.updated_at DESC, s.created_at DESC
+      LIMIT 100
+      `,
+    );
+
+    sendJson(res, 200, {
+      persistence_enabled: true,
+      works: result.rows.map(publicWork),
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_READ_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleGetWork(req, res, workId) {
+  if (!database.pool) {
+    sendJson(res, 404, {
+      status: "error",
+      error_code: "WORK_NOT_FOUND",
+      message: `Work not found: ${workId}`,
+    });
+    return;
+  }
+
+  try {
+    const result = await database.pool.query(
+      `
+      SELECT
+        s.id,
+        s.user_id,
+        s.author_id,
+        u.nickname AS author_name,
+        s.title,
+        s.description,
+        s.cover_image,
+        s.tags,
+        s.status,
+        s.world_setting,
+        s.character_setting,
+        s.opening_message,
+        s.default_model,
+        s.generation_options,
+        s.created_at,
+        s.updated_at,
+        COUNT(sess.id)::integer AS session_count
+      FROM stories s
+      LEFT JOIN users u ON u.id = COALESCE(s.author_id, s.user_id)
+      LEFT JOIN sessions sess ON sess.story_id = s.id AND sess.status <> 'deleted'
+      WHERE s.id = $1 AND s.status = 'published'
+      GROUP BY s.id, u.nickname
+      `,
+      [workId],
+    );
+
+    if (!result.rows.length) {
+      sendJson(res, 404, {
+        status: "error",
+        error_code: "WORK_NOT_FOUND",
+        message: `Work not found: ${workId}`,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      persistence_enabled: true,
+      work: publicWork(result.rows[0]),
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "error",
+      error_code: "DB_READ_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+async function handleStartWork(req, res, workId) {
+  if (!requireDatabase(res)) {
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, {
+      status: "error",
+      error_code: "INVALID_REQUEST_BODY",
+      message: error.message,
+    });
+    return;
+  }
+
+  const userId = cleanText(body.player_id || body.user_id, "local_user");
+  const sessionId = cleanText(body.session_id || body.id, makeId("session"));
+
+  try {
+    const result = await withDbTransaction(async (client) => {
+      await ensureUser(client, userId);
+
+      const storyResult = await client.query(
+        `
+        SELECT *
+        FROM stories
+        WHERE id = $1 AND status = 'published'
+        FOR SHARE
+        `,
+        [workId],
+      );
+
+      if (!storyResult.rows.length) {
+        throw new Error(`Work not found: ${workId}`);
+      }
+
+      const work = storyResult.rows[0];
+      const title = cleanText(body.title, `${work.title}：新的存档`);
+      const storyState = defaultStoryState();
+
+      const sessionResult = await client.query(
+        `
+        INSERT INTO sessions (id, user_id, story_id, title, status)
+        VALUES ($1, $2, $3, $4, 'active')
+        ON CONFLICT (id) DO UPDATE
+        SET
+          user_id = EXCLUDED.user_id,
+          story_id = EXCLUDED.story_id,
+          title = EXCLUDED.title,
+          status = 'active'
+        RETURNING *
+        `,
+        [sessionId, userId, work.id, title],
+      );
+
+      await client.query(
+        `
+        INSERT INTO story_states (session_id, user_id, story_id, state, version)
+        VALUES ($1, $2, $3, $4::jsonb, 1)
+        ON CONFLICT (session_id) DO UPDATE
+        SET
+          user_id = EXCLUDED.user_id,
+          story_id = EXCLUDED.story_id,
+          state = EXCLUDED.state,
+          version = 1,
+          updated_at = now()
+        `,
+        [sessionId, userId, work.id, JSON.stringify(storyState)],
+      );
+
+      const openingMessage = cleanText(work.opening_message, "");
+      if (openingMessage) {
+        await client.query(
+          `
+          INSERT INTO messages (id, session_id, role, content, metadata)
+          VALUES ($1, $2, 'assistant', $3, $4::jsonb)
+          `,
+          [
+            makeId("msg"),
+            sessionId,
+            openingMessage,
+            jsonParam({
+              source: "opening_message",
+              story_id: work.id,
+            }),
+          ],
+        );
+      }
+
+      return {
+        work,
+        session: sessionResult.rows[0],
+        story_state: storyState,
+      };
+    });
+
+    sendJson(res, 201, {
+      status: "success",
+      story_id: result.work.id,
+      work_id: result.work.id,
+      session_id: result.session.id,
+      work: publicWork({ ...result.work, session_count: 0 }),
+      session: result.session,
+      story_state: result.story_state,
+      story_state_version: 1,
+    });
+  } catch (error) {
+    sendJson(res, error.message.startsWith("Work not found") ? 404 : 500, {
+      status: "error",
+      error_code: error.message.startsWith("Work not found") ? "WORK_NOT_FOUND" : "DB_WRITE_FAILED",
       message: error.message,
     });
   }
@@ -1694,6 +1963,23 @@ function handleRequest(req, res) {
     sendJson(res, 200, {
       workers: getConnectedWorkers().map(publicWorker),
     });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/works") {
+    handleListWorks(req, res);
+    return;
+  }
+
+  const workPlayMatch = url.pathname.match(/^\/api\/works\/([^/]+)\/play$/);
+  if (workPlayMatch && req.method === "POST") {
+    handleStartWork(req, res, decodeURIComponent(workPlayMatch[1]));
+    return;
+  }
+
+  const workMatch = url.pathname.match(/^\/api\/works\/([^/]+)$/);
+  if (workMatch && req.method === "GET") {
+    handleGetWork(req, res, decodeURIComponent(workMatch[1]));
     return;
   }
 

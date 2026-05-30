@@ -17,6 +17,12 @@
           </div>
         </div>
         <div class="topbar-actions">
+          <button class="icon-button" id="discoverButton" type="button" title="作品大厅">
+            <span aria-hidden="true">⌂</span>
+          </button>
+          <button class="icon-button" id="playButton" type="button" title="当前游玩">
+            <span aria-hidden="true">▶</span>
+          </button>
           <button class="icon-button" id="libraryToggle" type="button" title="故事与会话">
             <span aria-hidden="true">☰</span>
           </button>
@@ -68,7 +74,23 @@
         </div>
       </section>
 
-      <section class="story-stage" aria-live="polite">
+      <section class="discover-view app-view" id="discoverView" hidden>
+        <div class="view-heading">
+          <div>
+            <span>作品大厅</span>
+            <h2>选择一个世界开始游玩</h2>
+          </div>
+          <button class="secondary-button" id="refreshWorksButton" type="button">刷新</button>
+        </div>
+        <div class="work-grid" id="workGrid"></div>
+      </section>
+
+      <section class="work-detail-view app-view" id="workDetailView" hidden>
+        <button class="text-button" id="backToDiscoverButton" type="button">返回大厅</button>
+        <article class="work-detail" id="workDetail"></article>
+      </section>
+
+      <section class="story-stage app-view" id="playView" aria-live="polite">
         <div class="story-meta">
           <span id="storyTitleDisplay">黑夜古堡</span>
           <span id="workerStatus">Worker 未连接</span>
