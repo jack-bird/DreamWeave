@@ -19,6 +19,7 @@ const DATABASE_URL = process.env.DATABASE_URL || "";
 
 const workers = new Map();
 const pendingTasks = new Map();
+const pendingRagTasks = new Map();
 const MOBILE_WEB_DIR = path.resolve(__dirname, "..", "..", "mobile-web");
 const CONTENT_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -701,7 +702,6 @@ function sendJson(res, statusCode, payload) {
   res.end(body);
 }
 
-// 发送 RAG 任务给 Worker 的辅助函数
 async function sendRagTaskToWorker(storyId, ragPayload) {
   const worker = selectWorker();
   if (!worker) {
@@ -709,8 +709,9 @@ async function sendRagTaskToWorker(storyId, ragPayload) {
   }
 
   const requestId = makeId("req_rag");
+  const taskId = makeId("rag_task");
   const taskPayload = {
-    task_id: makeId("rag_task"),
+    task_id: taskId,
     task_type: ragPayload.task_type || "index",
     story_id: storyId,
     ...ragPayload
@@ -718,19 +719,53 @@ async function sendRagTaskToWorker(storyId, ragPayload) {
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
+      pendingRagTasks.delete(taskId);
       reject(new Error("RAG 任务超时"));
     }, 30000); // 30秒超时
 
-    // 监听 RAG 结果（需要实现简单的消息处理）
+    pendingRagTasks.set(taskId, {
+      taskId,
+      requestId,
+      workerId: worker.workerId,
+      timeout,
+      resolve,
+      reject,
+    });
+
     worker.send("rag.task", taskPayload, requestId);
-    
-    // 简化处理：假设 RAG 任务会很快完成
-    // 在实际生产环境中需要更好的异步处理机制
-    setTimeout(() => {
-      clearTimeout(timeout);
-      resolve({ success: true, message: "RAG 任务已发送" });
-    }, 100);
   });
+}
+
+function completePendingRagTask(message) {
+  const payload = message.payload || {};
+  let taskId = payload.task_id;
+  if (!taskId && message.request_id) {
+    const pendingByRequest = [...pendingRagTasks.values()].find((pending) => pending.requestId === message.request_id);
+    taskId = pendingByRequest?.taskId;
+  }
+  if (!taskId) {
+    return false;
+  }
+
+  const pending = pendingRagTasks.get(taskId);
+  if (!pending) {
+    console.warn(`[server] Late or unknown RAG result ignored: ${taskId}`);
+    return false;
+  }
+
+  pendingRagTasks.delete(taskId);
+  clearTimeout(pending.timeout);
+
+  if (payload.success === false || payload.error) {
+    pending.reject(new Error(payload.error || payload.message || "RAG task failed"));
+    return true;
+  }
+
+  pending.resolve({
+    ...payload,
+    request_id: message.request_id,
+  });
+  return true;
 }
 
 function sendFile(req, res, filePath) {
@@ -3219,7 +3254,16 @@ class WorkerConnection {
       return;
     }
 
+    if (type === "rag.result") {
+      console.log(`[server] Worker message: ${type} task=${payload.task_id || ""}`);
+      completePendingRagTask(message);
+      return;
+    }
+
     if (type === "error") {
+      if (payload.error_code === "RAG_TASK_ERROR" && completePendingRagTask(message)) {
+        return;
+      }
       console.warn("[server] Worker protocol error:", payload);
       return;
     }
@@ -3328,6 +3372,16 @@ class WorkerConnection {
         httpStatus: 503,
         payload,
       });
+    }
+
+    for (const [taskId, pending] of pendingRagTasks.entries()) {
+      if (pending.workerId !== this.workerId) {
+        continue;
+      }
+
+      pendingRagTasks.delete(taskId);
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("Worker 连接已断开"));
     }
 
     console.log(`[server] Worker disconnected: ${this.workerId}`);

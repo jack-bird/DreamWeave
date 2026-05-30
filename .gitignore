@@ -16,6 +16,9 @@ npm-debug.log*
 .env.*
 !.env.example
 
+# Local vector store
+chroma_db/
+
 # OS / editor
 .DS_Store
 Thumbs.db

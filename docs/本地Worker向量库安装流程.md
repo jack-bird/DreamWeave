@@ -108,6 +108,15 @@ python .\apps\local-ai-worker\main.py health
 .\start-online-worker.bat
 ```
 
+`start-online-worker.bat` 默认会设置：
+
+```bat
+set "HF_HUB_OFFLINE=1"
+set "TRANSFORMERS_OFFLINE=1"
+```
+
+这会让 `sentence-transformers` 优先使用本地 Hugging Face 缓存，避免 Worker 每次启动或检索时访问外网。前提是 embedding 模型已经至少成功下载过一次。
+
 启动后，在服务器确认 Worker 已连接：
 
 ```bash
@@ -201,4 +210,3 @@ curl http://127.0.0.1:3000/health
 ```text
 E:\ai_home\AI_Projects\DreamWeave\chroma_db
 ```
-

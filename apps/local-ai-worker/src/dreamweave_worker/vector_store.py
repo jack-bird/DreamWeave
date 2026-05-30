@@ -5,8 +5,8 @@
 
 import logging
 from typing import List, Dict, Any, Optional, Tuple
-from chromadb import Client, Collection
-from chromadb.config import Settings
+import chromadb
+from chromadb import Collection
 from .embeddings import get_embedding_model, generate_embedding
 
 logger = logging.getLogger(__name__)
@@ -22,17 +22,14 @@ class LoreVectorStore:
             persist_directory: Chroma 数据持久化目录
         """
         self.persist_directory = persist_directory
-        self.client: Optional[Client] = None
+        self.client: Optional[Any] = None
         self.collections: Dict[str, Collection] = {}
         
-    def _get_client(self) -> Client:
+    def _get_client(self) -> Any:
         """获取或创建 Chroma 客户端"""
         if self.client is None:
             logger.info(f"Initializing Chroma client with persist directory: {self.persist_directory}")
-            self.client = Client(Settings(
-                chroma_db_impl="duckdb+parquet",
-                persist_directory=self.persist_directory
-            ))
+            self.client = chromadb.PersistentClient(path=self.persist_directory)
         return self.client
     
     def _get_collection_name(self, story_id: str) -> str:
