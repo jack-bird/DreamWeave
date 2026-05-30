@@ -2,7 +2,7 @@
 
 更新日期：2026-05-30
 
-当前执行状态：P0-P2 第一版已落地到本地代码，待执行数据库 migration 和线上部署验证。
+当前执行状态：P0-P2 第一版已完成本地实现和线上验证。下一步进入 P3 作者后台 MVP。
 
 ## 1. 目标
 
@@ -621,10 +621,39 @@ H5 work detail 视图
 - [x] `node --check apps/mobile-web/app.js`
 - [x] `python test_agent_workflow.py`
 - [x] 本地 smoke test `/api/works`。
-- [ ] 本地手测开始游玩后继续生成。
-- [ ] 线上部署后复核 `sessions`、`messages`、`story_states` 写入。
+- [x] 线上手测开始游玩后继续生成。
+- [x] 线上部署后复核 `sessions`、`messages`、`story_states` 写入。
 
-## 15. 暂缓事项
+## 15. 第二轮任务清单：P3 作者后台 MVP
+
+### 15.1 Server
+
+- [ ] 新增 `GET /api/creator/works`。
+- [ ] 新增 `POST /api/creator/works`。
+- [ ] 新增 `GET /api/creator/works/:id`。
+- [ ] 新增 `PUT /api/creator/works/:id`。
+- [ ] 新增 `DELETE /api/creator/works/:id`。
+- [ ] 新增 `POST /api/creator/works/:id/publish`。
+- [ ] 新增 `POST /api/creator/works/:id/unpublish`。
+
+### 15.2 H5
+
+- [ ] 增加作者后台入口。
+- [ ] 增加 `#/creator/works` 作品管理视图。
+- [ ] 支持创建草稿作品。
+- [ ] 支持编辑标题、简介、标签、世界观、角色设定、开场白、默认模型。
+- [ ] 支持发布 / 下架作品。
+- [ ] 支持删除作品并二次确认。
+
+### 15.3 验证
+
+- [ ] `node --check apps/server/src/index.js`
+- [ ] `node --check apps/mobile-web/app.js`
+- [ ] `python test_agent_workflow.py`
+- [ ] 本地手测作者创建草稿、发布后在大厅可见。
+- [ ] 线上部署后复核 `stories.status`、`opening_message` 和大厅可见性。
+
+## 16. 暂缓事项
 
 第一轮不要做：
 
